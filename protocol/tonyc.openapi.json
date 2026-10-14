@@ -1,0 +1,1550 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tonyc agent protocol",
+    "version": "1.1",
+    "description": "tonyc/1: the language-neutral contract between agents or orchestrators and tonycd. HTTP/1.1 with JSON bodies, over the daemon's Unix socket (or an optional loopback TCP port). This document covers the agent contract (conformance level `core`); operator endpoints (/v1/status, /v1/models, /v1/nodes, /v1/policy, /v1/economics, /v1/pd, ...) are described in docs/PROTOCOL.md.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://tonycd",
+      "description": "Any host header; the transport is the Unix socket."
+    }
+  ],
+  "paths": {
+    "/v1/protocol": {
+      "get": {
+        "operationId": "protocol",
+        "summary": "Protocol name, revision and features. Clients check this first.",
+        "responses": {
+          "200": {
+            "description": "The protocol.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Protocol"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "post": {
+        "operationId": "submit",
+        "summary": "submit(work) -> JobId (\u00a718).",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "1-200 printable ASCII characters, no spaces. Remembered for 24 hours, across restarts."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkRequest"
+              }
+            },
+            "application/yaml": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Submission"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed: the Idempotency-Key matched an earlier identical request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Submission"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_jobs",
+        "summary": "Jobs, newest first.",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only jobs from this origin system."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "jobs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/JobSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "jobs"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "operationId": "status",
+        "summary": "status(job) -> JobStatus (\u00a718).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A job id or a unique prefix of one (8+ characters with tny_)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/await": {
+      "get": {
+        "operationId": "await",
+        "summary": "await(job) -> Result (\u00a718): long-polls until the job is terminal.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A job id or a unique prefix of one (8+ characters with tny_)."
+          },
+          {
+            "name": "timeout_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "maximum": 600000
+            },
+            "description": "Default 30000."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Terminal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Not terminal when the timeout passed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/cancel": {
+      "post": {
+        "operationId": "cancel",
+        "summary": "cancel(job) (\u00a718).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A job id or a unique prefix of one (8+ characters with tny_)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Stopping a running job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "state"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/try": {
+      "post": {
+        "operationId": "try",
+        "summary": "tonyc.try() (\u00a719): existing cognition now, or a miss. Never queues work; a miss is recorded as demand.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hit or miss.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/cognition": {
+      "get": {
+        "operationId": "query",
+        "summary": "query(cognitive_query) -> Vec<CognitiveObject> (\u00a718).",
+        "parameters": [
+          {
+            "name": "text",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "FRESH",
+                "STALE",
+                "ALL"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Objects, ranked by relevance when text is given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "objects": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CognitiveObject"
+                      }
+                    }
+                  },
+                  "required": [
+                    "objects"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/invalidate": {
+      "post": {
+        "operationId": "invalidate",
+        "summary": "invalidate(scope) (\u00a718): marks cognition stale, cascading to what was derived from it.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "object": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
+                  "event": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "description": "Exactly one of object, path, scope or event."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What was invalidated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invalidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "events",
+        "summary": "The durable job event feed, for orchestrators. Resume from `next`.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Cursor: 0 (default) from the beginning, -1 from now."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "wait_ms",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "maximum": 60000
+            },
+            "description": "Long-poll until there is an event."
+          },
+          {
+            "name": "system",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only jobs from this origin system."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events after the cursor, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string",
+            "description": "The request field at fault, for 400s."
+          },
+          "job_id": {
+            "type": "string",
+            "description": "The earlier job, for an idempotency conflict (409)."
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Protocol": {
+        "type": "object",
+        "properties": {
+          "protocol": {
+            "type": "string",
+            "const": "tonyc/1"
+          },
+          "revision": {
+            "type": "string",
+            "description": "Minor revisions only add endpoints, fields and features."
+          },
+          "daemon": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "submit status await cancel try query invalidate events idempotency origin refinement preemptive_dynamism ssh_fabric economics"
+          },
+          "envelope": {
+            "type": "string",
+            "const": "tonyc.envelope/1"
+          },
+          "transport": {
+            "type": "object",
+            "properties": {
+              "unix": {
+                "type": "string"
+              },
+              "tcp": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "await_timeout_ms_max": {
+                "type": "integer"
+              },
+              "events_wait_ms_max": {
+                "type": "integer"
+              },
+              "events_limit_max": {
+                "type": "integer"
+              },
+              "idempotency_ttl_ms": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "required": [
+          "protocol",
+          "revision",
+          "daemon",
+          "features",
+          "envelope"
+        ]
+      },
+      "Check": {
+        "type": "object",
+        "properties": {
+          "contains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "absent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_chars": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "json_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "description": "A machine-checkable requirement; at least one field."
+      },
+      "WorkRequest": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Ignored: the daemon assigns ids."
+              },
+              "objective": {
+                "type": "string",
+                "minLength": 1
+              },
+              "capability": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "e.g. general, summarisation, code.rust (default general)."
+              },
+              "input": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Absolute paths."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "max_tokens": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              },
+              "pin_model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "<runtime>/<model>; for benchmarks and diagnostics."
+              }
+            },
+            "required": [
+              "objective"
+            ],
+            "additionalProperties": false
+          },
+          "latency": {
+            "type": "object",
+            "properties": {
+              "class": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "NOW, SOON, DEFERRED (default), IDLE or SPECULATIVE. Case-insensitive."
+              },
+              "deadline": {
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ],
+                "description": "Relative (`45m`, `2h`, `1d`) or absolute milliseconds since the epoch."
+              }
+            },
+            "additionalProperties": false
+          },
+          "quality": {
+            "type": "object",
+            "properties": {
+              "floor": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              },
+              "verification": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "none (default), preferred or required. Case-insensitive."
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Check"
+                }
+              },
+              "refine": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "auto (default), always or never. Case-insensitive."
+              },
+              "max_rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 5
+              }
+            },
+            "additionalProperties": false
+          },
+          "privacy": {
+            "type": "object",
+            "properties": {
+              "locality": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "LOCAL_ONLY, LAN_ALLOWED, SSH_ALLOWLIST, REMOTE_ALLOWLIST or UNRESTRICTED; the daemon's ceiling can only narrow it. Case-insensitive."
+              },
+              "ssh_allowlist": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "remote_allowlist": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "cpu": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "opportunistic or normal. Case-insensitive."
+              },
+              "gpu": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "opportunistic or normal. Case-insensitive."
+              },
+              "energy": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "economical, balanced or performance. Case-insensitive."
+              },
+              "on_node_failure": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "fallback (default) or fail. Case-insensitive."
+              }
+            },
+            "additionalProperties": false
+          },
+          "reuse": {
+            "type": "object",
+            "properties": {
+              "cache": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "corpus": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Scope: user, project:<name>, repository:<name>, ..."
+              },
+              "freshness": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "immutable, ttl, source_hash, event, dependency or manual. Case-insensitive."
+              },
+              "ttl": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "output": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "text/v1 (default) or json/v1. Case-insensitive."
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "fact, analysis (default), summary, classification, prediction, artifact, embedding, validation or negative_result. Case-insensitive."
+              }
+            },
+            "additionalProperties": false
+          },
+          "origin": {
+            "type": "object",
+            "properties": {
+              "system": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The orchestrator or agent system: lucid, terri, mcp, ... Attribution only."
+              },
+              "run": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The caller's own reference for the work."
+              },
+              "agent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "additionalProperties": false,
+        "description": "What an agent submits. Unknown fields are rejected. YAML is accepted too."
+      },
+      "Envelope": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "const": "tonyc.envelope/1"
+          },
+          "id": {
+            "type": "string"
+          },
+          "submitted_at": {
+            "type": "integer"
+          },
+          "semantic_hash": {
+            "type": "string"
+          },
+          "task": {
+            "type": "object"
+          },
+          "latency": {
+            "type": "object"
+          },
+          "quality": {
+            "type": "object"
+          },
+          "privacy": {
+            "type": "object"
+          },
+          "resources": {
+            "type": "object"
+          },
+          "reuse": {
+            "type": "object"
+          },
+          "output": {
+            "type": "object"
+          },
+          "origin": {
+            "type": "object",
+            "properties": {
+              "system": {
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              },
+              "agent": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "system"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "id",
+          "submitted_at",
+          "semantic_hash",
+          "task",
+          "latency",
+          "quality",
+          "privacy",
+          "resources",
+          "reuse",
+          "output"
+        ],
+        "description": "The compiled, fully explicit contract the scheduler works from."
+      },
+      "JobState": {
+        "type": "string",
+        "enum": [
+          "QUEUED",
+          "PLANNING",
+          "RUNNING",
+          "REFINING",
+          "READY",
+          "STALE",
+          "CANCELLED",
+          "DEADLINE_EXCEEDED",
+          "RESOURCE_BLOCKED",
+          "POLICY_BLOCKED",
+          "MODEL_FAILED",
+          "NODE_UNREACHABLE",
+          "INSUFFICIENT_QUALITY"
+        ]
+      },
+      "Exposure": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "in_process",
+              "loopback",
+              "lan",
+              "ssh",
+              "remote"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "description": "Where data went: in_process and loopback never leave the host."
+      },
+      "Submission": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "Present and true when an Idempotency-Key matched an earlier submission."
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "envelope"
+        ]
+      },
+      "JobSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "class": {
+            "type": "string"
+          },
+          "locality": {
+            "type": "string"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "submitted_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          },
+          "deadline_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "objective",
+          "submitted_at",
+          "updated_at"
+        ]
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "envelope": {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          "submitted_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "decision": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The scheduling decision, with rejected alternatives (inspectable, G14)."
+          },
+          "failure": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Why the job did not produce an answer; `reason` is human-readable."
+          },
+          "cognition": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "envelope",
+          "submitted_at",
+          "updated_at"
+        ]
+      },
+      "Result": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "model_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exposure": {
+            "$ref": "#/components/schemas/Exposure"
+          },
+          "semantic_hash": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "blake3": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "path",
+                "blake3",
+                "bytes"
+              ]
+            }
+          },
+          "tokens_in": {
+            "type": "integer"
+          },
+          "tokens_out": {
+            "type": "integer"
+          },
+          "started_at": {
+            "type": "integer"
+          },
+          "finished_at": {
+            "type": "integer"
+          },
+          "reused_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the answer came from the Cognitive Store without inference."
+          },
+          "object_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "output",
+          "schema",
+          "model",
+          "runtime",
+          "exposure",
+          "semantic_hash",
+          "tokens_in",
+          "tokens_out",
+          "started_at",
+          "finished_at"
+        ],
+        "description": "A result with its derivation provenance (G8)."
+      },
+      "JobEvent": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "at": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detail": {}
+        },
+        "required": [
+          "seq",
+          "at",
+          "kind"
+        ]
+      },
+      "JobDetail": {
+        "type": "object",
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Result"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobEvent"
+            }
+          },
+          "boundary": {
+            "type": "array"
+          },
+          "ledger": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "passes": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "job",
+          "result",
+          "events",
+          "boundary"
+        ]
+      },
+      "CognitiveObject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "FRESH",
+              "STALE"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "validation": {
+            "type": "string"
+          },
+          "freshness": {
+            "type": "string"
+          },
+          "sensitivity": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "stale_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sources": {
+            "type": "integer"
+          },
+          "parents": {
+            "type": "integer"
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when withheld (secret content in listings)."
+          },
+          "withheld": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "scope",
+          "objective",
+          "confidence",
+          "created_at",
+          "content",
+          "withheld"
+        ]
+      },
+      "TryResult": {
+        "type": "object",
+        "properties": {
+          "hit": {
+            "type": "boolean"
+          },
+          "object": {
+            "$ref": "#/components/schemas/CognitiveObject"
+          },
+          "notes": {
+            "type": "array"
+          },
+          "skipped": {
+            "type": "array",
+            "description": "Candidates that did not qualify, with reasons."
+          },
+          "nearest": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CognitiveObject"
+            }
+          }
+        },
+        "required": [
+          "hit",
+          "skipped"
+        ]
+      },
+      "Invalidation": {
+        "type": "object",
+        "properties": {
+          "objects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "objects",
+          "jobs"
+        ]
+      },
+      "FeedEvent": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "at": {
+            "type": "integer"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JobState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "origin": {
+            "oneOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "seq",
+          "at",
+          "job_id",
+          "kind",
+          "terminal"
+        ]
+      },
+      "EventPage": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedEvent"
+            }
+          },
+          "next": {
+            "type": "integer",
+            "description": "Resume from here."
+          }
+        },
+        "required": [
+          "events",
+          "next"
+        ]
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "An error.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

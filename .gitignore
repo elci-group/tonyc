@@ -1,0 +1,17 @@
+/target
+/integrations/*/target
+/cli/tonyc
+__pycache__/
+*.db
+*.db-*
+
+# kaptaind working state and local Claude Code state
+/.kaptaind/
+/.claude/
+/.uni/
+# Scaffolding written by uni analysers
+/.lwoodz/
+/lwoodz.toml
+/traci.toml
+/poka.toml
+/poka.lock

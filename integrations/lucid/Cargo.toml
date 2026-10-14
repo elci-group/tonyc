@@ -1,0 +1,29 @@
+# Tonyc for Lucid (directive §28): a Lucid `ModelProvider` that serves
+# existing cognition from Tonyc before calling the real provider.
+#
+# Built against a Lucid checkout next to this repository
+# (../../../dreamsequence/lucid); scripts/integrations.sh builds and tests it
+# when that checkout exists. Not a member of the Tonyc workspace, so Tonyc
+# builds without Lucid.
+[package]
+name = "tonyc-lucid"
+description = "Lucid ModelProvider backed by Tonyc's cold and warm paths"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+lucid-platform = { path = "../../../dreamsequence/lucid/platform" }
+tonyc-sdk = { path = "../../crates/tonyc-sdk" }
+async-trait = "0.1"
+blake3 = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tonycd = { path = "../../crates/tonycd" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

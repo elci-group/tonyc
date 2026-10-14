@@ -1,0 +1,33 @@
+# The directive's example envelope (§6). `verification: required` makes
+# Tonyc draft cheaply and have an independent model validate the answer
+# (refinement, Phase 5). If no informative validator may take the job — or
+# even a passing validation could not reach the floor — it ends
+# INSUFFICIENT_QUALITY before any inference, and says why.
+task:
+  objective: "Analyse dependency drift"
+  capability: rust
+  input:
+    files: [/path/to/Cargo.lock]
+
+latency:
+  class: deferred
+  deadline: 45m
+
+quality:
+  floor: 0.6
+  verification: required
+
+privacy:
+  locality: local_only
+
+resources:
+  cpu: opportunistic
+  gpu: opportunistic
+  energy: economical
+
+reuse:
+  cache: true
+  corpus: project:myapp   # scope the result; `user` results are visible to every project
+
+output:
+  schema: text/v1

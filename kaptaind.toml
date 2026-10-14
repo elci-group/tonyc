@@ -1,0 +1,54 @@
+# kaptaind configuration for tonyc.
+#
+# Releases are cut with one-shot transactions (`kaptaind commit --push`)
+# after a batch of verified work, not by a long-running watcher; staging
+# mode "all" lets that one transaction see changes made before it started.
+# Push needs three keys together: [push] enabled, [capabilities]
+# network_push, and an unprotected `main`. `patch = 0.0` keeps small or
+# docs-only changes from becoming chore commits, which never push.
+
+[operation]
+mode = "actuate"
+
+[watch]
+path = "."
+recursive = true
+ignore_file = ".kaptainignore"
+
+[cluster]
+window = 5
+
+[weights]
+s = 0.35
+a = 0.30
+d = 0.20
+r = 0.15
+
+[version_thresholds]
+minor = 0.6
+patch = 0.0
+
+[push]
+enabled = true
+branch = "main"
+
+[push.safety]
+protect_branches = []
+
+[capabilities]
+network_push = true
+
+[ratelimit]
+min_commit_interval = 10
+
+[trust]
+execution = "trusted"
+
+# The full suite: Rust fmt/clippy/tests, Tov check/test/build, CLI e2e.
+# Needs tov on PATH; uses only the built-in runtime (no model needed).
+[test]
+command = "scripts/check.sh"
+required = true
+
+[staging]
+mode = "all"

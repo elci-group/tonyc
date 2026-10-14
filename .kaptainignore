@@ -1,0 +1,18 @@
+# Common
+.git
+.kaptaind
+.claude
+.DS_Store
+*.swp
+*.swo
+
+# Rust
+target
+
+# Analysis output (uni)
+.uni
+.lwoodz
+lwoodz.toml
+traci.toml
+poka.toml
+poka.lock

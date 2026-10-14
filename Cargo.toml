@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+exclude = ["integrations"]
+members = ["crates/tonyc-core", "crates/tonycd", "crates/tonyc-sdk", "crates/tonyc-mcp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/elci-group/tonyc"
+rust-version = "1.88"
+
+[workspace.dependencies]
+tonyc-core = { path = "crates/tonyc-core", version = "0.1.0" }
+tonyc-sdk = { path = "crates/tonyc-sdk", version = "0.1.0" }
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+rusqlite = { version = "0.35", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7"] }

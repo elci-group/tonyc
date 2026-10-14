@@ -1,0 +1,22 @@
+[package]
+name = "tonyc-mcp"
+description = "Tonyc as Model Context Protocol tools: lets any MCP agent defer, reuse and collect cognition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tonyc-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tonyc-sdk.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt"] }
+
+[dev-dependencies]
+tonycd = { path = "../tonycd" }
+tempfile.workspace = true
+tokio.workspace = true

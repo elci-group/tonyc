@@ -1,0 +1,97 @@
+[[file]]
+path = "README.md"
+required = true
+
+[[file]]
+path = "docs/ARCHITECTURE.md"
+required = true
+
+[[file]]
+path = "crates/tonyc-core/src/plan.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/scheduler.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/cognition.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/fabric.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/economics.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/bench.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/refinement.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!", "DEBUG"]
+
+[[file]]
+path = "crates/tonyc-core/src/refine.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/pd.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/protocol.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonyc-sdk/src/lib.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonyc-mcp/src/lib.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "crates/tonycd/src/runtimes/command.rs"
+required = true
+forbid_regex = ["TODO", "FIXME", "unimplemented!", "todo!"]
+
+[[file]]
+path = "docs/PROTOCOL.md"
+required = true
+
+[[file]]
+path = "protocol/tonyc.openapi.json"
+required = true
+
+[[file]]
+path = "sdk/python/tonyc.py"
+required = true
+forbid_regex = ["TODO", "FIXME"]
+
+[[file]]
+path = "cli/main.tov"
+required = true
+forbid_regex = ["TODO", "FIXME"]
+
+[[command]]
+name = "Full suite (Rust + Tov + e2e)"
+cmd = ["scripts/check.sh"]
+cwd = "."
+expect_exit = 0
+stdout_contains = ["e2e: 82 checks passed"]

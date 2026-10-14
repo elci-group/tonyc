@@ -1,0 +1,1099 @@
+// tonyc — command-line client for the Tonyc daemon (tonycd).
+
+import { readFileSync, existsSync } from "node:fs"
+import * as path from "node:path"
+import { Ceiling } from "./client"
+import { Client, defaultSocket, isTerminal, JobDetail, ObjectView, InvalidateRequest, NodeView, AddNodeRequest, PolicySetRequest, BenchDetail, PdStatus, FeedEvent } from "./client"
+import { Args, UsageError, parseArgs, flag, flags, has, parseDuration } from "./args"
+import { human, pad, clip, exposureLabel } from "./format"
+
+const VERSION = "0.1.0"
+
+// Exit codes: 0 ok · 1 daemon/API error · 2 usage · 3 job ended unsuccessfully
+// · 4 still pending · 5 no existing cognition (try).
+const EXIT_FAILED = 3
+const EXIT_PENDING = 4
+const EXIT_MISS = 5
+
+function usage(): string {
+  return `tonyc ${VERSION} — deferred inference for agents
+
+Usage: tonyc <command> [options]
+
+Jobs:
+  submit <file|->            Submit a work request (YAML or JSON)
+  submit --objective <text>  Submit from flags:
+      --class now|soon|deferred|idle|speculative   --deadline 45m
+      --locality local_only|lan_allowed|...         --floor 0.0-1.0
+      --capability <name>  --max-tokens <n>  --file <path>...  --text <input>
+      --schema text/v1|json/v1  --verification none|preferred|required
+      --energy economical|balanced|performance  --wait  --timeout <dur>
+      --scope <ns[:name]>  --kind <kind>  --freshness source_hash|ttl|event|manual|immutable
+      --ttl <dur>  --event <tag>...  --no-cache
+      --ssh-allow <node>...  --on-node-failure fallback|fail
+      --refine auto|always|never  --max-rounds N
+      --check-contains T...  --check-absent T...  --check-max-chars N  --check-json-field F...
+      --origin <system[:run]>  --agent <name>  --idempotency-key <key>
+  jobs [--state S] [--origin SYSTEM] [--limit N]   List recent jobs
+  inspect <job>              Decision trace: what was chosen and why
+  await <job> [--timeout D]  Wait for a job to finish, then print its result
+  result <job>               Print a finished job's output
+  cancel <job>               Cancel a queued or running job
+
+Cognitive Store:
+  try <file|-|--objective …> Return existing cognition now, or exit 5 if there is none
+  query <text> [--scope S] [--kind K] [--stale|--all] [--limit N]
+                             Search existing cognition by relevance
+  cache inspect [<object>]   List objects, or one object's lineage and freshness
+  cache scan                 Re-check the corpus and every fresh object now
+  cache prune [--older-than D]  Delete stale objects
+  invalidate --object ID | --path P | --scope S | --event TAG [--reason R]
+  corpus add <path>... [--scope S] [--sensitivity public|normal|sensitive|secret]
+  corpus inspect [--scope S]
+  corpus forget <scope|path> Stop tracking, delete derived cognition, redact results
+
+SSH compute fabric:
+  node add <name> --ssh <user@host|alias> [--host-key SHA256:…] [--port N]
+      [--identity FILE] [--runtime-url http://127.0.0.1:11434] [--policy private|shared] [--slots N]
+                             Pin the host key, probe the node, register it
+  nodes                      Nodes, health, hardware and models
+  node probe <name>          Probe a node again
+  node remove <name>         Unregister a node and unpin its host key
+  audit [--job J] [--payload] [--limit N]
+                             Every off-host crossing; --payload prints the exact bytes sent
+                             (tonyc doctor re-checks each against its job's policy)
+
+Economics:
+  models [--refresh]         Models: quality, measured speed, warm/cold, exposure
+  model inspect <model>      Prior vs measured profile, benchmark evidence, recent runs
+  model benchmark <model> [--capability C] [--cases N] [--class idle|deferred|now] [--wait]
+                             Measure a model's quality with checkable tasks
+  benchmarks                 Benchmark runs
+  economics [--since 7d]     Cost avoided, operating cost, compute, budgets
+
+Preemptive Dynamism:
+  pd status                  Speculation: pending work, budget, Preemption Yield
+  pd explain                 What Tonyc is preparing, and why it expects it to be used
+  pd evaluate                Evaluate demand now rather than at the next interval
+  pd pause | pd resume       Stop or restart speculative work
+
+Ecosystem:
+  protocol                   The protocol the daemon speaks, and its features
+  events [--after N] [--system S] [--limit N] [--follow]
+                             The job event feed (orchestrators resume from a cursor)
+
+Daemon:
+  status                     Daemon, host pressure, runtimes and queue
+  policy show                Locality ceiling and defaults
+  policy set [--max-locality L] [--default-locality L] [--reset]
+                             Explicitly widen or narrow where data may go
+  host                       Host hardware and pressure
+  doctor                     Check that Tonyc is usable
+
+Options:
+  --socket <path>   Daemon socket (default: $TONYC_SOCKET or ${defaultSocket()})
+  --json            Machine-readable output where supported
+  -h, --help        Show this help
+
+Job and object ids may be abbreviated to any unique prefix (at least 4 characters
+after tny_ or obj_). Sensitive and secret corpus files force LOCAL_ONLY execution.`
+}
+
+type PolicyDefaults = { locality: string, quality_floor: f64 }
+type PolicyView = { ceiling: Ceiling, defaults: PolicyDefaults, sources: Map<string, string> }
+
+function out(s: string): void {
+  process.stdout.write(s + "\n")
+}
+
+function q(s: string): string {
+  return JSON.stringify(s)
+}
+
+// Builds a JSON work request from command-line flags. Only flags that were
+// given appear; the daemon applies its policy defaults to the rest.
+function requestFromFlags(a: Args): string throws UsageError {
+  const objective = flag(a, "objective")
+  if (objective === undefined) throw new UsageError("submit needs a request file, `-` for stdin, or --objective")
+  const task: string[] = [`"objective":${q(objective)}`]
+  const capability = flag(a, "capability")
+  if (capability !== undefined) task.push(`"capability":${q(capability)}`)
+  const maxTokens = flag(a, "max-tokens")
+  if (maxTokens !== undefined) {
+    const n = parseInt(maxTokens)
+    if (n === undefined) throw new UsageError(`--max-tokens must be an integer`)
+    task.push(`"max_tokens":${n}`)
+  }
+  const input: string[] = []
+  const text = flag(a, "text")
+  if (text !== undefined) input.push(`"text":${q(text)}`)
+  const files = flags(a, "file").map((f: string): string => q(path.resolve(f)))
+  if (files.length > 0) input.push(`"files":[${files.join(",")}]`)
+  if (input.length > 0) task.push(`"input":{${input.join(",")}}`)
+
+  const sections: string[] = [`"task":{${task.join(",")}}`]
+  const section = (name: string, pairs: string[]) => {
+    if (pairs.length > 0) sections.push(`"${name}":{${pairs.join(",")}}`)
+  }
+  const pick = (flagName: string, key: string): string[] => {
+    const v = flag(a, flagName)
+    return v === undefined ? [] : [`"${key}":${q(v)}`]
+  }
+  section("latency", pick("class", "class").concat(pick("deadline", "deadline")))
+  const floorText = flag(a, "floor")
+  const quality: string[] = pick("verification", "verification")
+  if (floorText !== undefined) {
+    const floor = parseFloat(floorText)
+    if (floor === undefined) throw new UsageError(`--floor must be a number`)
+    quality.push(`"floor":${floor}`)
+  }
+  const refine = flag(a, "refine")
+  if (refine !== undefined) quality.push(`"refine":${q(refine)}`)
+  const rounds = flag(a, "max-rounds")
+  if (rounds !== undefined) {
+    const n = parseInt(rounds)
+    if (n === undefined) throw new UsageError("--max-rounds must be an integer")
+    quality.push(`"max_rounds":${n}`)
+  }
+  const check: string[] = []
+  const list = (name: string): string[] => flags(a, name).map((v: string): string => q(v))
+  const contains = list("check-contains")
+  if (contains.length > 0) check.push(`"contains":[${contains.join(",")}]`)
+  const absent = list("check-absent")
+  if (absent.length > 0) check.push(`"absent":[${absent.join(",")}]`)
+  const fields = list("check-json-field")
+  if (fields.length > 0) check.push(`"json_fields":[${fields.join(",")}]`)
+  const maxChars = flag(a, "check-max-chars")
+  if (maxChars !== undefined) {
+    const n = parseInt(maxChars)
+    if (n === undefined) throw new UsageError("--check-max-chars must be an integer")
+    check.push(`"max_chars":${n}`)
+  }
+  if (check.length > 0) quality.push(`"checks":[{${check.join(",")}}]`)
+  section("quality", quality)
+  const privacy: string[] = pick("locality", "locality")
+  const allow = flags(a, "ssh-allow").map((n: string): string => q(n))
+  if (allow.length > 0) privacy.push(`"ssh_allowlist":[${allow.join(",")}]`)
+  section("privacy", privacy)
+  section("resources", pick("energy", "energy").concat(pick("on-node-failure", "on_node_failure")))
+  section("output", pick("schema", "schema").concat(pick("kind", "kind")))
+  const reuse: string[] = pick("scope", "corpus").concat(pick("freshness", "freshness")).concat(pick("ttl", "ttl"))
+  const events = flags(a, "event").map((e: string): string => q(e))
+  if (events.length > 0) reuse.push(`"events":[${events.join(",")}]`)
+  if (has(a, "no-cache")) reuse.push(`"cache":false`)
+  section("reuse", reuse)
+  const origin = flag(a, "origin")
+  const agent = flag(a, "agent")
+  if (origin !== undefined) {
+    const colon = origin.indexOf(":")
+    const o: string[] = colon < 0 ? [`"system":${q(origin)}`] : [`"system":${q(origin.slice(0, colon))}`, `"run":${q(origin.slice(colon + 1))}`]
+    if (agent !== undefined) o.push(`"agent":${q(agent)}`)
+    sections.push(`"origin":{${o.join(",")}}`)
+  } else if (agent !== undefined) {
+    throw new UsageError("--agent needs --origin")
+  }
+  return `{${sections.join(",")}}`
+}
+
+function stateLine(d: JobDetail): string {
+  const failure = d.job.failure
+  if (failure === undefined) return `${d.job.id}  ${d.job.state}`
+  return `${d.job.id}  ${d.job.state}  (${failure.stage}: ${failure.reason})`
+}
+
+// Prints a finished job's output (or why it has none) and returns the exit code.
+function report(d: JobDetail): int {
+  const r = d.result
+  if (d.job.state === "READY" && r !== undefined) {
+    out(r.output)
+    return 0
+  }
+  // A stale result is still shown, but never with a success status: it no
+  // longer reflects its sources.
+  if (d.job.state === "STALE" && r !== undefined) {
+    console.error(`${d.job.id} is STALE: its sources or the cognition it was built on have changed`)
+    out(r.output)
+    return EXIT_FAILED
+  }
+  console.error(stateLine(d))
+  return EXIT_FAILED
+}
+
+async function waitFor(c: Client, id: string, timeoutMs: int): Promise<int> throws Error {
+  const until = Date.now() + timeoutMs
+  while (true) {
+    const left = Math.trunc(until - Date.now())
+    const slice = left < 30000 ? left : 30000
+    const w = try await c.wait(id, slice > 0 ? slice : 0)
+    if (w.done) return report(w.detail)
+    if (Date.now() >= until) {
+      console.error(`${stateLine(w.detail)} — still pending after ${human(timeoutMs)}; \`tonyc await ${id}\` to keep waiting`)
+      return EXIT_PENDING
+    }
+  }
+}
+
+// A work request from a file, stdin (`-`), or flags.
+function readRequest(a: Args): string throws Error {
+  const source = a.positional[1]
+  if (source === undefined) return try requestFromFlags(a)
+  if (source === "-") return try readFileSync("/dev/stdin", "utf8")
+  return try readFileSync(source, "utf8")
+}
+
+async function cmdSubmit(c: Client, a: Args): Promise<int> throws Error {
+  const request = try readRequest(a)
+  const key = flag(a, "idempotency-key")
+  let id = ""
+  if (key === undefined) {
+    id = try await c.submit(request)
+  } else {
+    const s = try await c.submitOnce(request, key)
+    if (s.replayed === true) console.error(`${s.id} was already submitted with this key`)
+    id = s.id
+  }
+  if (!has(a, "wait")) {
+    out(id)
+    return 0
+  }
+  console.error(`submitted ${id}`)
+  const timeout = flag(a, "timeout")
+  return try await waitFor(c, id, timeout === undefined ? 3600000 : try parseDuration(timeout))
+}
+
+async function cmdStatus(c: Client, a: Args): Promise<int> throws Error {
+  if (has(a, "json")) {
+    out(try await c.text("GET", "/v1/status", undefined))
+    return 0
+  }
+  const s = try await c.status()
+  const p = s.pressure
+  out(`tonycd ${s.version}  pid ${s.pid}  up ${human(s.uptime_ms)}`)
+  out(`socket     ${s.socket}`)
+  out(`state      ${s.data_dir}`)
+  out(`ceiling    ${s.ceiling.class}`)
+  const memFree = Math.round(p.memory_available_fraction * 100)
+  const verdict = p.busy ? `busy: ${p.reasons.join("; ")}` : "idle enough for background work"
+  out(`host       load ${p.load_per_core.toFixed(2)}/core, ${memFree}% memory free — ${verdict}`)
+  const running = s.running.length === 0 ? "idle" : s.running.join(", ")
+  out(`workers    ${s.workers} (${running})`)
+  out("runtimes")
+  for (const r of s.runtimes) {
+    const health = r.healthy ? "healthy" : "DOWN"
+    const where = r.exposure === undefined ? "in-process" : exposureLabel(r.exposure)
+    const models = r.models === undefined ? "" : `  ${r.models} model(s)`
+    const err = r.last_error === undefined ? "" : `  (${r.last_error})`
+    out(`  ${pad(r.runtime, 9)} ${pad(health, 8)} ${where}${models}${err}`)
+  }
+  const counts: string[] = []
+  for (const k of s.jobs.keys()) counts.push(`${k} ${s.jobs.get(k) ?? 0}`)
+  out(`jobs       ${counts.length === 0 ? "none yet" : counts.join(", ")}`)
+  const cg = s.cognition
+  const d = cg.demand
+  out(`cognition  ${cg.fresh} fresh, ${cg.stale} stale; corpus ${cg.corpus_files} file(s)`)
+  out(`reuse      ${d.get("reuse_hit") ?? 0} job(s) served without inference; try ${d.get("try_hit") ?? 0} hit / ${d.get("try_miss") ?? 0} miss`)
+  if (s.nodes.length > 0) {
+    const parts: string[] = []
+    for (const n of s.nodes) parts.push(`${n.name} ${n.healthy ? "up" : "DOWN"}`)
+    out(`nodes      ${parts.join(", ")}`)
+  }
+  out(`capacity   ${s.capacity} concurrent job(s)`)
+  out(`off-host crossings  ${s.off_host_crossings}`)
+  return 0
+}
+
+function intFlag(a: Args, name: string): int | undefined throws UsageError {
+  const v = flag(a, name)
+  if (v === undefined) return undefined
+  const n = parseInt(v)
+  if (n === undefined) throw new UsageError(`--${name} must be an integer`)
+  return n
+}
+
+function nodeLine(n: NodeView): string {
+  const health = n.healthy ? "up" : "DOWN"
+  const caps = n.capabilities
+  let hw = "-"
+  if (caps !== undefined) {
+    hw = `${caps.arch} ${caps.cores}c ${Math.round(caps.memory_mb / 1024)}G`
+    if (caps.gpus.length > 0) hw += ` ${caps.gpus.length}gpu`
+  }
+  const kind = n.shared ? "shared" : "private"
+  return `${pad(n.name, 12)} ${pad(health, 5)} ${pad(kind, 8)} ${pad(`${n.slots_free}/${n.slots}`, 6)} ${pad(hw, 22)} ${pad(`${n.models.length}`, 7)} ${n.target}`
+}
+
+async function cmdNode(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1]
+  const name = a.positional[2]
+  if (sub === "add") {
+    if (name === undefined) throw new UsageError("node add needs a name")
+    const target = flag(a, "ssh")
+    if (target === undefined) throw new UsageError("node add needs --ssh <user@host>")
+    const req: AddNodeRequest = { name: name, ssh: target }
+    const port = try intFlag(a, "port")
+    if (port !== undefined) req.port = port
+    const slots = try intFlag(a, "slots")
+    if (slots !== undefined) req.slots = slots
+    const identity = flag(a, "identity")
+    if (identity !== undefined) req.identity = path.resolve(identity)
+    const url = flag(a, "runtime-url")
+    if (url !== undefined) req.runtime_url = url
+    const policy = flag(a, "policy")
+    if (policy !== undefined) req.policy = policy
+    const hostKey = flag(a, "host-key")
+    if (hostKey !== undefined) req.host_key = hostKey
+    const n = try await c.addNode(req)
+    out(`added ${n.name} (${n.target}); host key pinned; ${n.healthy ? "healthy" : `UNHEALTHY: ${n.last_error ?? "?"}`}`)
+    if (n.models.length > 0) out(`models: ${n.models.join(", ")}`)
+    const blocked = n.ceiling_blocks
+    if (blocked !== undefined) {
+      out(`note: not usable yet — ${blocked}`)
+      out(`      raise the ceiling explicitly: tonyc policy set --max-locality ssh_allowlist`)
+    }
+    return n.healthy ? 0 : 1
+  }
+  if (sub === "probe") {
+    if (name === undefined) throw new UsageError("node probe needs a name")
+    const n = try await c.probeNode(name)
+    out(nodeLine(n))
+    if (!n.healthy) out(`  ${n.last_error ?? "down"}`)
+    const blocked = n.ceiling_blocks
+    if (blocked !== undefined) out(`  not usable yet under the current ceiling: ${blocked}`)
+    return n.healthy ? 0 : 1
+  }
+  if (sub === "remove") {
+    if (name === undefined) throw new UsageError("node remove needs a name")
+    try await c.removeNode(name)
+    out(`removed ${name}; its host key is no longer pinned`)
+    return 0
+  }
+  throw new UsageError("node needs add, probe or remove (list them with `tonyc nodes`)")
+}
+
+async function cmdNodes(c: Client, a: Args): Promise<int> throws Error {
+  if (has(a, "json")) {
+    out(try await c.text("GET", "/v1/nodes", undefined))
+    return 0
+  }
+  const nodes = try await c.nodes()
+  if (nodes.length === 0) {
+    out("no nodes; add one with `tonyc node add <name> --ssh <user@host>`")
+    return 0
+  }
+  out(`${pad("NAME", 12)} ${pad("STATE", 5)} ${pad("POLICY", 8)} ${pad("SLOTS", 6)} ${pad("HARDWARE", 22)} ${pad("MODELS", 7)} TARGET`)
+  for (const n of nodes) {
+    out(nodeLine(n))
+    if (!n.healthy) out(`  ${n.last_error ?? "down"}`)
+    const blocked = n.ceiling_blocks
+    if (blocked !== undefined) out(`  not usable under the current ceiling: ${blocked}`)
+  }
+  return 0
+}
+
+async function cmdPolicy(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1] ?? "show"
+  if (sub === "set") {
+    const req: PolicySetRequest = {}
+    const max = flag(a, "max-locality")
+    if (max !== undefined) req.max_locality = max
+    const def = flag(a, "default-locality")
+    if (def !== undefined) req.default_locality = def
+    if (has(a, "reset")) req.reset = true
+    if (max === undefined && def === undefined && !has(a, "reset")) {
+      throw new UsageError("policy set needs --max-locality, --default-locality or --reset")
+    }
+    try await c.setPolicy(req)
+  } else if (sub !== "show") {
+    throw new UsageError("policy needs show or set")
+  }
+  const text = try await c.policy()
+  if (has(a, "json")) {
+    out(text)
+    return 0
+  }
+  const p: PolicyView = try JSON.parse(text)
+  out(`ceiling           ${p.ceiling.class}   (${p.sources.get("max_locality") ?? "config"})`)
+  const ssh = p.ceiling.ssh_allowlist ?? []
+  if (ssh.length > 0) out(`  ssh nodes       ${ssh.join(", ")}`)
+  const remote = p.ceiling.remote_allowlist ?? []
+  if (remote.length > 0) out(`  remote hosts    ${remote.join(", ")}`)
+  out(`default locality  ${p.defaults.locality}   (${p.sources.get("default_locality") ?? "config"})`)
+  out(`default floor     ${p.defaults.quality_floor}`)
+  return 0
+}
+
+async function cmdAudit(c: Client, a: Args): Promise<int> throws Error {
+  const params = new URLSearchParams()
+  const job = flag(a, "job")
+  if (job !== undefined) params.set("job", job)
+  if (has(a, "payload")) params.set("payload", "true")
+  params.set("limit", flag(a, "limit") ?? "50")
+  if (has(a, "json")) {
+    out(try await c.text("GET", `/v1/audit?${params.toString()}`, undefined))
+    return 0
+  }
+  const r = try await c.audit(params.toString())
+  if (r.crossings.length === 0) {
+    out("no data has left this host")
+    return 0
+  }
+  out(`${r.total_off_host} off-host crossing(s) in total`)
+  for (const x of r.crossings) {
+    const hash = x.payload_blake3 === undefined ? "" : `  blake3 ${x.payload_blake3.slice(0, 16)}`
+    out(`${ago(x.at)} ago  ${x.job_id}  ${exposureLabel(x.exposure)}  sent ${x.bytes_sent} B, received ${x.bytes_received} B${hash}`)
+    out(`  ${x.summary}`)
+    const payload = x.payload
+    if (payload !== undefined) out(payload)
+  }
+  return 0
+}
+
+function ago(at: int): string {
+  return human(Math.trunc(Date.now()) - at)
+}
+
+function objectTable(objects: ObjectView[]): void {
+  if (objects.length === 0) {
+    out("no matching cognition")
+    return
+  }
+  out(`${pad("ID", 21)} ${pad("STATE", 6)} ${pad("KIND", 15)} ${pad("SCORE", 6)} ${pad("CONF", 5)} ${pad("AGE", 8)} ${pad("SCOPE", 16)} OBJECTIVE`)
+  for (const o of objects) {
+    const score = o.score === undefined ? "-" : o.score.toFixed(2)
+    out(`${pad(o.id, 21)} ${pad(o.state, 6)} ${pad(o.kind, 15)} ${pad(score, 6)} ${pad(o.confidence.toFixed(2), 5)} ${pad(ago(o.created_at), 8)} ${pad(o.scope, 16)} ${clip(o.objective, 44)}`)
+  }
+}
+
+function queryParams(a: Args, text: string | undefined): string throws UsageError {
+  const p = new URLSearchParams()
+  if (text !== undefined) p.set("text", text)
+  const scope = flag(a, "scope")
+  if (scope !== undefined) p.set("scope", scope)
+  const kind = flag(a, "kind")
+  if (kind !== undefined) p.set("kind", kind)
+  if (has(a, "stale") && has(a, "all")) throw new UsageError("use either --stale or --all")
+  if (has(a, "stale")) p.set("state", "STALE")
+  if (has(a, "all")) p.set("state", "ALL")
+  p.set("limit", flag(a, "limit") ?? "20")
+  return p.toString()
+}
+
+async function cmdTry(c: Client, a: Args): Promise<int> throws Error {
+  const request = try readRequest(a)
+  const r = try await c.tryExisting(request)
+  if (has(a, "json")) {
+    out(JSON.stringify(r, undefined, 2))
+    return r.hit ? 0 : EXIT_MISS
+  }
+  const o = r.object
+  if (r.hit && o !== undefined) {
+    console.error(`hit ${o.id} (${o.kind}, ${o.model}, ${ago(o.created_at)} old, freshness ${o.freshness} verified now)`)
+    out(o.content ?? "")
+    return 0
+  }
+  console.error("no existing cognition satisfies this request (recorded as demand)")
+  for (const s of r.skipped) console.error(`  not reused: ${s}`)
+  const nearest = r.nearest ?? []
+  if (nearest.length > 0) {
+    console.error("nearest:")
+    for (const n of nearest) console.error(`  ${n.id}  ${(n.score ?? 0).toFixed(2)}  ${clip(n.objective, 60)}`)
+  }
+  return EXIT_MISS
+}
+
+async function cmdQuery(c: Client, a: Args): Promise<int> throws Error {
+  const words = a.positional.slice(1)
+  if (words.length === 0) throw new UsageError("query needs some text (or use `tonyc cache inspect` to list)")
+  const params = try queryParams(a, words.join(" "))
+  if (has(a, "json")) {
+    out(try await c.text("GET", `/v1/cognition?${params}`, undefined))
+    return 0
+  }
+  objectTable(try await c.query(params))
+  return 0
+}
+
+async function cmdObject(c: Client, a: Args, id: string): Promise<int> throws Error {
+  if (has(a, "json")) {
+    out(try await c.text("GET", `/v1/cognition/${id}`, undefined))
+    return 0
+  }
+  const d = try await c.object(id)
+  const o = d.object
+  out(`Object ${o.id}  ${o.state}  ${o.kind}`)
+  out(`  objective: ${clip(o.objective, 100)}`)
+  out(`  scope ${o.scope}, sensitivity ${o.sensitivity}, produced under ${o.privacy.class}`)
+  out(`  model ${o.model} (${o.runtime}, digest ${o.model_digest ?? "unknown"}) via ${exposureLabel(o.exposure)}`)
+  out(`  job ${o.job_id}, ${ago(o.created_at)} ago; confidence ${o.confidence.toFixed(2)} (${o.validation})`)
+  const f = o.freshness
+  let policy = f.policy
+  if (f.ttl_ms !== undefined) policy += ` ${human(f.ttl_ms)}`
+  const events = f.events ?? []
+  if (events.length > 0) policy += ` [${events.join(", ")}]`
+  out(`  freshness ${policy}: ${d.fresh_now ? "fresh now" : `stale — ${d.stale_because ?? o.stale_reason ?? "?"}`}`)
+  if (o.sources.length > 0) {
+    out("\nSources:")
+    for (const s of o.sources) out(`  ${s.path}  ${s.bytes} bytes  blake3 ${s.blake3.slice(0, 16)}`)
+  }
+  if (d.ancestors.length > 0) {
+    out("\nDerived from:")
+    for (const p of d.ancestors) {
+      let indent = ""
+      for (let i = 0; i < p.depth; i++) indent += "  "
+      out(`${indent}${p.id}  ${p.relation}  ${p.state}  ${p.model ?? ""}`)
+    }
+  }
+  if (d.children.length > 0) {
+    out("\nUsed by:")
+    for (const ch of d.children) out(`  ${ch.id}  ${ch.relation}`)
+  }
+  out("\nHistory:")
+  for (const e of d.events) out(`  ${ago(e.at)} ago  ${e.kind}`)
+  out("\nContent:")
+  out(o.content)
+  return 0
+}
+
+async function cmdCache(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1]
+  if (sub === "inspect") {
+    const id = a.positional[2]
+    if (id !== undefined) return try await cmdObject(c, a, id)
+    const params = try queryParams(a, undefined)
+    if (has(a, "json")) out(try await c.text("GET", `/v1/cognition?${params}`, undefined))
+    else objectTable(try await c.query(params))
+    return 0
+  }
+  if (sub === "scan") {
+    const r = try await c.scan()
+    out(`checked ${r.objects_checked} object(s) and ${r.corpus_files} corpus file(s); ${r.corpus_changed.length} changed`)
+    if (r.invalidated.objects.length > 0) out(`invalidated: ${r.invalidated.objects.join(", ")}`)
+    if (r.invalidated.jobs.length > 0) out(`jobs now STALE: ${r.invalidated.jobs.join(", ")}`)
+    return 0
+  }
+  if (sub === "prune") {
+    const r = try await c.prune(flag(a, "older-than"))
+    out(`pruned ${r.pruned} stale object(s)`)
+    return 0
+  }
+  throw new UsageError("cache needs inspect, scan or prune")
+}
+
+async function cmdInvalidate(c: Client, a: Args): Promise<int> throws Error {
+  const req: InvalidateRequest = {}
+  const object = flag(a, "object")
+  const p = flag(a, "path")
+  const scope = flag(a, "scope")
+  const event = flag(a, "event")
+  if (object !== undefined) req.object = object
+  if (p !== undefined) req.path = path.resolve(p)
+  if (scope !== undefined) req.scope = scope
+  if (event !== undefined) req.event = event
+  const reason = flag(a, "reason")
+  if (reason !== undefined) req.reason = reason
+  const r = try await c.invalidate(req)
+  out(`invalidated ${r.objects.length} object(s)${r.objects.length > 0 ? ": " + r.objects.join(", ") : ""}`)
+  if (r.jobs.length > 0) out(`jobs now STALE: ${r.jobs.join(", ")}`)
+  return 0
+}
+
+async function cmdCorpus(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1]
+  if (sub === "add") {
+    const paths = a.positional.slice(2).map((p: string): string => path.resolve(p))
+    if (paths.length === 0) throw new UsageError("corpus add needs at least one path")
+    const entries = try await c.corpusAdd({ paths: paths, scope: flag(a, "scope"), sensitivity: flag(a, "sensitivity") })
+    const scope = flag(a, "scope") ?? "user"
+    out(`tracking ${entries.length} file(s) in ${scope} (${flag(a, "sensitivity") ?? "normal"})`)
+    return 0
+  }
+  if (sub === "inspect") {
+    const entries = try await c.corpus(flag(a, "scope"))
+    if (has(a, "json")) {
+      out(JSON.stringify(entries, undefined, 2))
+      return 0
+    }
+    if (entries.length === 0) {
+      out("the corpus is empty; add files with `tonyc corpus add <path>`")
+      return 0
+    }
+    out(`${pad("SCOPE", 20)} ${pad("SENSITIVITY", 11)} ${pad("BYTES", 9)} PATH`)
+    for (const e of entries) {
+      const size = e.present ? `${e.bytes ?? 0}` : "missing"
+      out(`${pad(e.scope, 20)} ${pad(e.sensitivity, 11)} ${pad(size, 9)} ${e.path}`)
+    }
+    return 0
+  }
+  if (sub === "forget") {
+    const raw = a.positional[2]
+    if (raw === undefined) throw new UsageError("corpus forget needs a scope or a path")
+    const target = raw.startsWith("/") || raw.startsWith(".") || raw.includes("/") ? path.resolve(raw) : raw
+    const r = try await c.forget(target)
+    out(`forgot ${r.paths.length} file(s); deleted ${r.purged_objects.length} derived object(s), redacted ${r.redacted_results} result(s)`)
+    if (r.invalidated.objects.length > 0) out(`dependent objects now STALE: ${r.invalidated.objects.join(", ")}`)
+    if (r.invalidated.jobs.length > 0) out(`jobs now STALE: ${r.invalidated.jobs.join(", ")}`)
+    return 0
+  }
+  throw new UsageError("corpus needs add, inspect or forget")
+}
+
+async function cmdJobs(c: Client, a: Args): Promise<int> throws Error {
+  const limitText = flag(a, "limit") ?? "20"
+  const limit = parseInt(limitText)
+  if (limit === undefined) throw new UsageError("--limit must be an integer")
+  if (has(a, "json")) {
+    const state = flag(a, "state")
+    const origin = flag(a, "origin")
+    let qs = state === undefined ? "" : `&state=${state}`
+    if (origin !== undefined) qs += `&origin=${origin}`
+    out(try await c.text("GET", `/v1/jobs?limit=${limit}${qs}`, undefined))
+    return 0
+  }
+  const jobs = try await c.jobs(flag(a, "state"), limit, flag(a, "origin"))
+  if (jobs.length === 0) {
+    out("no jobs")
+    return 0
+  }
+  const now = Date.now()
+  out(`${pad("ID", 21)} ${pad("STATE", 20)} ${pad("CLASS", 11)} ${pad("AGE", 8)} ${pad("MODEL", 22)} OBJECTIVE`)
+  for (const j of jobs) {
+    const age = human(Math.trunc(now) - j.submitted_at)
+    out(`${pad(j.id, 21)} ${pad(j.state, 20)} ${pad(j.class, 11)} ${pad(age, 8)} ${pad(j.model ?? "-", 22)} ${clip(j.objective, 50)}`)
+  }
+  return 0
+}
+
+async function cmdModels(c: Client, a: Args): Promise<int> throws Error {
+  const m = try await c.models(has(a, "refresh"))
+  if (has(a, "json")) {
+    out(JSON.stringify(m, undefined, 2))
+    return 0
+  }
+  if (m.models.length === 0) {
+    out("no models: enable a runtime in tonycd.toml or start one (e.g. ollama)")
+    return 0
+  }
+  out(`${pad("MODEL", 26)} ${pad("WHERE", 28)} ${pad("QUALITY", 16)} ${pad("TOK/S", 7)} ${pad("PROFILE", 16)} STATE`)
+  for (const e of m.models) {
+    const p = e.profile
+    const general = p.capabilities.get("general")
+    const quality = general === undefined ? "-" : `general ${general.toFixed(2)}`
+    let profile = p.source
+    if (p.evidence.runs > 0) profile += ` (${p.evidence.runs})`
+    const states: string[] = [p.loaded ? "warm" : "cold"]
+    if (!e.healthy) states.push("runtime down")
+    const blocked = e.ceiling_blocks
+    if (blocked !== undefined) states.push(`blocked: ${blocked}`)
+    out(`${pad(p.id, 26)} ${pad(exposureLabel(e.exposure), 28)} ${pad(quality, 16)} ${pad(p.performance.tokens_per_sec.toFixed(1), 7)} ${pad(profile, 16)} ${states.join(", ")}`)
+  }
+  return 0
+}
+
+function measured(v: f64 | undefined, unit: string): string {
+  return v === undefined ? "-" : `${v.toFixed(1)}${unit}`
+}
+
+function measuredMs(v: int | undefined): string {
+  return v === undefined ? "-" : human(v)
+}
+
+async function cmdModel(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1]
+  const id = a.positional[2]
+  if (sub === "inspect") {
+    if (id === undefined) throw new UsageError("model inspect needs a model id (see `tonyc models`)")
+    if (has(a, "json")) {
+      const p = new URLSearchParams()
+      p.set("id", id)
+      out(try await c.text("GET", `/v1/model?${p.toString()}`, undefined))
+      return 0
+    }
+    const m = try await c.model(id)
+    const e = m.effective
+    const o = m.observed
+    out(`Model ${e.id}  ${e.source}  ${e.loaded ? "warm" : "cold"}  ${m.healthy ? "healthy" : "runtime down"}`)
+    out(`  via ${exposureLabel(m.exposure)}${m.configured_override ? "; configuration overrides part of it" : ""}`)
+    out(`  ${o.runs} run(s) measured; measurements replace priors after ${m.min_runs}`)
+    const prior = m.prior
+    out(`\n  ${pad("", 16)} ${pad("PRIOR", 12)} ${pad("MEASURED", 12)} EFFECTIVE`)
+    const pp = prior === undefined ? "-" : prior.performance.tokens_per_sec.toFixed(1)
+    out(`  ${pad("generation", 16)} ${pad(pp, 12)} ${pad(measured(o.tokens_per_sec, ""), 12)} ${e.performance.tokens_per_sec.toFixed(1)} tok/s`)
+    const pf = prior === undefined ? "-" : prior.performance.prefill_tokens_per_sec.toFixed(1)
+    out(`  ${pad("prefill", 16)} ${pad(pf, 12)} ${pad(measured(o.prefill_tokens_per_sec, ""), 12)} ${e.performance.prefill_tokens_per_sec.toFixed(1)} tok/s`)
+    const pc = prior === undefined ? "-" : human(prior.performance.startup_ms)
+    out(`  ${pad("cold start", 16)} ${pad(pc, 12)} ${pad(measuredMs(o.cold_startup_ms), 12)} ${human(e.performance.startup_ms)}`)
+    const pw = prior === undefined ? "-" : human(prior.performance.warm_startup_ms)
+    out(`  ${pad("warm start", 16)} ${pad(pw, 12)} ${pad(measuredMs(o.warm_startup_ms), 12)} ${human(e.performance.warm_startup_ms)}`)
+    out("\n  quality")
+    for (const cap of e.capabilities.keys()) {
+      const q = e.capabilities.get(cap) ?? 0
+      const ev = e.evidence.quality.get(cap)
+      const basis = ev === undefined ? "prior" : `prior ${ev.prior.toFixed(2)}, benchmarks ${ev.passed}/${ev.total}`
+      out(`    ${pad(cap, 16)} ${q.toFixed(2)}  (${basis})`)
+    }
+    if (m.recent.length > 0) {
+      out("\n  recent runs")
+      for (const r of m.recent) {
+        const t = r.timings
+        const split = t === undefined ? "" : `  load ${human(t.load_ms)}, prefill ${human(t.prefill_ms)}, generate ${human(t.generate_ms)}`
+        out(`    ${ago(r.at)} ago  ${r.job_id}  ${r.tokens_in}→${r.tokens_out} tokens in ${human(r.wall_ms)}${split}`)
+      }
+    }
+    return 0
+  }
+  if (sub === "benchmark") {
+    if (id === undefined) throw new UsageError("model benchmark needs a model id (see `tonyc models`)")
+    const parts: string[] = [`"model":${q(id)}`]
+    const cap = flag(a, "capability")
+    if (cap !== undefined) parts.push(`"capability":${q(cap)}`)
+    const cases = try intFlag(a, "cases")
+    if (cases !== undefined) parts.push(`"cases":${cases}`)
+    const cls = flag(a, "class")
+    if (cls !== undefined) parts.push(`"class":${q(cls)}`)
+    const run = try await c.benchmark(`{${parts.join(",")}}`)
+    if (!has(a, "wait")) {
+      out(run.id)
+      console.error(`benchmarking ${run.model}: ${run.cases} case(s) queued as ${run.class} jobs; \`tonyc benchmarks\` to follow`)
+      return 0
+    }
+    console.error(`benchmarking ${run.model}: ${run.cases} case(s) as ${run.class} jobs (${run.id})`)
+    const timeout = flag(a, "timeout")
+    const budget: int = timeout === undefined ? 3600000 : try parseDuration(timeout)
+    const until = Date.now() + budget
+    let detail = try await c.benchmarkRun(run.id)
+    while (detail.run.state !== "COMPLETE" && Date.now() < until) {
+      await new Promise<void>((resolve) => { setTimeout(() => resolve(), 1000) })
+      detail = try await c.benchmarkRun(run.id)
+    }
+    printBench(detail)
+    return detail.run.state === "COMPLETE" ? 0 : EXIT_PENDING
+  }
+  throw new UsageError("model needs inspect or benchmark")
+}
+
+function printBench(d: BenchDetail): void {
+  const r = d.run
+  out(`${r.id}  ${r.model}  ${r.state}  ${r.passed}/${r.scored - r.errors} passed  (${r.scored}/${r.cases} scored, ${r.errors} error(s))`)
+  for (const k of d.cases) {
+    const verdict = !k.scored ? k.job_state : k.passed === undefined ? "error" : k.passed ? "pass" : "FAIL"
+    out(`  ${pad(k.case, 26)} ${pad(verdict, 20)} ${k.note ?? ""}`)
+  }
+}
+
+async function cmdBenchmarks(c: Client, a: Args): Promise<int> throws Error {
+  const id = a.positional[1]
+  if (id !== undefined) {
+    printBench(try await c.benchmarkRun(id))
+    return 0
+  }
+  const runs = try await c.benchmarks()
+  if (runs.length === 0) {
+    out("no benchmark runs; start one with `tonyc model benchmark <model>`")
+    return 0
+  }
+  for (const r of runs) {
+    out(`${pad(r.id, 20)} ${pad(r.model, 26)} ${pad(r.state, 9)} ${r.passed}/${r.scored - r.errors} passed  ${ago(r.created_at)} ago`)
+  }
+  return 0
+}
+
+function gbp(v: f64): string {
+  return `£${v.toFixed(4)}`
+}
+
+async function cmdEconomics(c: Client, a: Args): Promise<int> throws Error {
+  const since = flag(a, "since")
+  if (has(a, "json")) {
+    const qs = since === undefined ? "" : `?since=${since}`
+    out(try await c.text("GET", `/v1/economics${qs}`, undefined))
+    return 0
+  }
+  const e = try await c.economics(since)
+  const j = e.jobs
+  const m = e.money
+  const ref = e.reference
+  out(`Economics ${since === undefined ? "since the start" : `over the last ${since}`} — estimates`)
+  out(`  reference: ${ref.name} at £${ref.input_gbp_per_mtok.toFixed(2)} in / £${ref.output_gbp_per_mtok.toFixed(2)} out per million tokens`)
+  out(`jobs        ${j.inference} inference (${j.inference_local} on this host, ${j.inference_off_host} off-host) · ${j.served_from_store} served from the store · ${j.with_context} with prior context`)
+  out(`avoided     ${j.remote_inference_avoided} remote inference call(s) · estimated ${gbp(m.estimated_cost_avoided_gbp)} (conventional cost ${gbp(m.conventional_gbp)})`)
+  out(`operating   ${gbp(m.operating_gbp)} = energy ${gbp(m.energy_gbp)} (${e.compute.energy_wh.toFixed(2)} Wh) + remote spend ${gbp(m.remote_spend_gbp)}`)
+  const ratio = e.inference_avoidance_ratio
+  out(`ratio       Inference Avoidance Ratio ${ratio === undefined ? "n/a (no operating cost recorded)" : `${ratio.toFixed(1)}×`}`)
+  const domains: string[] = []
+  for (const d of e.compute.hours_by_domain.keys()) {
+    const v = e.compute.hours_by_domain.get(d)
+    if (v !== undefined) domains.push(`${d} ${v.hours.toFixed(3)} h (${v.jobs} job(s))`)
+  }
+  out(`compute     ${domains.length === 0 ? "none" : domains.join(" · ")} · tokens ${e.tokens.tokens_in} in / ${e.tokens.tokens_out} out`)
+  out(`outcomes    ${j.deadline_misses} deadline miss(es) · ${j.insufficient_quality} insufficient quality · try ${j.try_hits} hit(s) / ${j.try_misses} miss(es)`)
+  const b = e.budgets
+  const daily: string[] = []
+  for (const k of b.daily_compute.keys()) {
+    const v = b.daily_compute.get(k)
+    if (v !== undefined) daily.push(`${k} ${human(v.used_ms)} of ${human(v.limit_ms)} today`)
+  }
+  out(`budgets     remote ${gbp(b.remote_monthly.spent_gbp)} of ${gbp(b.remote_monthly.limit_gbp)} this month${daily.length > 0 ? " · " + daily.join(" · ") : ""}${b.memory_max_mb > 0 ? ` · models up to ${b.memory_max_mb} MB` : ""}`)
+  const pre = e.preemption
+  const py = pre.preemption_yield
+  out(`preemption  ${pre.produced} answer(s) prepared ahead · ${pre.pd_hits} used (PD hits) · ${pre.discarded} discarded · ${pre.outstanding} waiting · Preemption Yield ${py === undefined ? "n/a" : py.toFixed(2)}`)
+  out(`            speculative compute used ${pre.speculative_used_hours.toFixed(3)} h, discarded ${pre.speculative_discarded_hours.toFixed(3)} h`)
+  for (const system of e.by_origin.keys()) {
+    const o = e.by_origin.get(system)
+    if (o !== undefined) {
+      out(`origin      ${pad(system, 14)} ${o.inference} inference · ${o.served_from_store} from the store · avoided ${gbp(o.estimated_cost_avoided_gbp)} · operating ${gbp(o.operating_gbp)}`)
+    }
+  }
+  return 0
+}
+
+async function cmdProtocol(c: Client): Promise<int> throws Error {
+  const p = try await c.protocol()
+  out(`${p.protocol} revision ${p.revision} · ${p.daemon.name} ${p.daemon.version} · envelope ${p.envelope}`)
+  out(`features  ${p.features.join(" ")}`)
+  return 0
+}
+
+function eventLine(e: FeedEvent): string {
+  const o = e.origin
+  const origin = o === undefined ? "" : `  ${o.system}${o.run === undefined ? "" : ":" + o.run}`
+  return `${pad(`${e.seq}`, 6)} ${e.job_id}  ${pad(e.kind, 12)} ${e.state ?? ""}${e.terminal ? " (terminal)" : ""}${origin}`
+}
+
+async function cmdEvents(c: Client, a: Args): Promise<int> throws Error {
+  const afterText = flag(a, "after")
+  let after = 0
+  if (afterText !== undefined) {
+    const n = parseInt(afterText)
+    if (n === undefined) throw new UsageError("--after must be an integer")
+    after = n
+  }
+  const limitText = flag(a, "limit") ?? "100"
+  const limit = parseInt(limitText)
+  if (limit === undefined) throw new UsageError("--limit must be an integer")
+  const system = flag(a, "system")
+  const follow = has(a, "follow")
+  while (true) {
+    const page = try await c.events(after, follow ? 60000 : 0, system, limit)
+    for (const e of page.events) out(has(a, "json") ? JSON.stringify(e) : eventLine(e))
+    after = page.next
+    if (!follow) {
+      console.error(`next ${after}`)
+      return 0
+    }
+  }
+}
+
+function pdStatusLines(s: PdStatus): void {
+  const state = !s.enabled ? "disabled in configuration" : s.paused ? "paused" : "active"
+  out(`Preemptive Dynamism  ${state} — window ${s.window}, horizon ${s.horizon}, requests asked ≥ ${s.min_demand}×`)
+  out(`pending   ${s.pending} of ${s.max_pending} speculative job(s)`)
+  out(`budget    SPECULATIVE ${human(s.budget.used_ms)} of ${human(s.budget.limit_ms)} today`)
+  const m = s.measured
+  const py = m.preemption_yield
+  out(`yield     ${m.consumed} of ${m.produced} prepared answer(s) used${py === undefined ? "" : ` (${py.toFixed(2)})`}; ${m.discarded} discarded; threshold P ≥ ${m.threshold.toFixed(2)}`)
+  const last = s.last_evaluated
+  out(`evaluated ${last === undefined ? "not yet" : `${ago(last)} ago`}`)
+}
+
+async function cmdPd(c: Client, a: Args): Promise<int> throws Error {
+  const sub = a.positional[1] ?? "status"
+  if (sub === "pause" || sub === "resume") {
+    pdStatusLines(try await c.pdSet(sub === "pause"))
+    return 0
+  }
+  if (sub === "status") {
+    if (has(a, "json")) out(try await c.text("GET", "/v1/pd", undefined))
+    else pdStatusLines(try await c.pdStatus())
+    return 0
+  }
+  if (sub === "evaluate") {
+    const e = try await c.pdEvaluate()
+    out(`${e.status}: ${e.considered.length} request(s) considered, ${e.submitted.length} prepared`)
+    for (const k of e.considered) out(`  ${k.prepared ? "prepare" : "skip   "}  ${clip(k.objective, 40)} — ${k.reason}`)
+    return 0
+  }
+  if (sub !== "explain") throw new UsageError("pd needs status, explain, evaluate, pause or resume")
+  if (has(a, "json")) {
+    out(try await c.text("GET", "/v1/pd/explain", undefined))
+    return 0
+  }
+  const x = try await c.pdExplain()
+  pdStatusLines(x.status)
+  out("\nWhat Tonyc is preparing, and why:")
+  let shown = 0
+  for (const p of x.predictions) {
+    const pr = p.prediction
+    if (pr.state !== "QUEUED" && pr.state !== "PRODUCED") continue
+    shown++
+    const job = p.job_state === undefined ? pr.job_id : `${pr.job_id} ${p.job_state}`
+    out(`  ${pr.id}  ${pr.state}  "${clip(pr.objective, 60)}"  (${job})`)
+    out(`    why: ${pr.reason}`)
+    out(`    P ${pr.probability.toFixed(2)} · value £${pr.value_gbp.toFixed(5)} · cost £${pr.cost_gbp.toFixed(5)}`)
+  }
+  if (shown === 0) out("  nothing at the moment")
+  out("\nRecent outcomes:")
+  let outcomes = 0
+  for (const p of x.predictions) {
+    const pr = p.prediction
+    const outcome = pr.outcome
+    if (outcome === undefined || pr.state === "PRODUCED" || outcomes >= 10) continue
+    outcomes++
+    out(`  ${pr.id}  ${pad(pr.state, 9)} "${clip(pr.objective, 40)}" — ${outcome}`)
+  }
+  if (outcomes === 0) out("  none yet")
+  const ev = x.last_evaluation
+  if (ev !== undefined) {
+    out(`\nLast evaluation, ${ago(ev.at)} ago (${ev.status}): considered ${ev.considered.length}`)
+    for (const k of ev.considered) {
+      if (!k.prepared) out(`  skip  "${clip(k.objective, 40)}" — ${k.reason}`)
+    }
+  }
+  return 0
+}
+
+async function cmdDoctor(c: Client): Promise<int> throws Error {
+  let failures = 0
+  const check = (ok: bool, label: string, detail: string) => {
+    out(`${ok ? "ok  " : "FAIL"}  ${pad(label, 22)} ${detail}`)
+  }
+  const sockOk = existsSync(c.socket)
+  check(sockOk, "socket", c.socket)
+  if (!sockOk) {
+    out("      start the daemon with `tonycd` (or set TONYC_SOCKET / --socket)")
+    return 1
+  }
+  const s = try await c.status()
+  check(true, "daemon", `tonycd ${s.version}, pid ${s.pid}`)
+  // Plain loops rather than .filter(): tov 0.0.1 miscompiles two arrow
+  // functions with differently typed parameters in one async function.
+  let healthy = 0
+  for (const r of s.runtimes) {
+    if (r.healthy) healthy++
+  }
+  if (healthy === 0) failures++
+  check(healthy > 0, "runtimes", `${healthy}/${s.runtimes.length} healthy`)
+  for (const r of s.runtimes) {
+    if (!r.healthy) out(`      ${r.runtime}: ${r.last_error ?? "down"}`)
+  }
+  const m = try await c.models(false)
+  let usable = 0
+  for (const e of m.models) {
+    if (e.healthy && e.ceiling_blocks === undefined) usable++
+  }
+  if (usable === 0) failures++
+  check(usable > 0, "admissible models", `${usable} under ceiling ${s.ceiling.class}`)
+  const v = try await c.verifyAudit()
+  const auditOk = v.violations.length === 0
+  if (!auditOk) failures++
+  check(auditOk, "boundary audit", `${v.checked} off-host crossing(s), ${v.violations.length} outside their job's policy`)
+  for (const x of v.violations) out(`      ${x.job} (#${x.seq}): ${x.reason}`)
+  check(true, "host pressure", s.pressure.busy ? `busy (${s.pressure.reasons.join("; ")}); background work waits` : "idle")
+  return failures === 0 ? 0 : 1
+}
+
+function jobArg(a: Args, command: string): string throws UsageError {
+  const id = a.positional[1]
+  if (id === undefined) throw new UsageError(`${command} needs a job id`)
+  return id
+}
+
+async function run(a: Args): Promise<int> throws Error {
+  if (has(a, "version")) {
+    out(`tonyc ${VERSION}`)
+    return 0
+  }
+  const command = a.positional[0]
+  if (command === undefined || has(a, "help") || command === "help") {
+    out(usage())
+    return command === undefined && !has(a, "help") ? 2 : 0
+  }
+  const c = new Client(flag(a, "socket") ?? defaultSocket())
+  switch (command) {
+    case "submit":
+      return try await cmdSubmit(c, a)
+    case "status":
+      return try await cmdStatus(c, a)
+    case "jobs":
+      return try await cmdJobs(c, a)
+    case "inspect": {
+      const id = try jobArg(a, "inspect")
+      if (has(a, "json")) out(try await c.jobJson(id))
+      else process.stdout.write(try await c.trace(id))
+      return 0
+    }
+    case "await": {
+      const id = try jobArg(a, "await")
+      const timeout = flag(a, "timeout")
+      return try await waitFor(c, id, timeout === undefined ? 3600000 : try parseDuration(timeout))
+    }
+    case "result": {
+      const d = try await c.job(try jobArg(a, "result"))
+      if (!isTerminal(d.job.state)) {
+        console.error(`${stateLine(d)} — not finished`)
+        return EXIT_PENDING
+      }
+      return report(d)
+    }
+    case "cancel": {
+      const id = try jobArg(a, "cancel")
+      out(`${id} ${try await c.cancel(id)}`)
+      return 0
+    }
+    case "models":
+      return try await cmdModels(c, a)
+    case "policy":
+      return try await cmdPolicy(c, a)
+    case "node":
+      return try await cmdNode(c, a)
+    case "nodes":
+      return try await cmdNodes(c, a)
+    case "audit":
+      return try await cmdAudit(c, a)
+    case "model":
+      return try await cmdModel(c, a)
+    case "benchmarks":
+      return try await cmdBenchmarks(c, a)
+    case "economics":
+      return try await cmdEconomics(c, a)
+    case "host":
+      out(try await c.host())
+      return 0
+    case "doctor":
+      return try await cmdDoctor(c)
+    case "try":
+      return try await cmdTry(c, a)
+    case "query":
+      return try await cmdQuery(c, a)
+    case "cache":
+      return try await cmdCache(c, a)
+    case "invalidate":
+      return try await cmdInvalidate(c, a)
+    case "corpus":
+      return try await cmdCorpus(c, a)
+    case "pd":
+      return try await cmdPd(c, a)
+    case "protocol":
+      return try await cmdProtocol(c)
+    case "events":
+      return try await cmdEvents(c, a)
+    default:
+      throw new UsageError(`unknown command \`${command}\``)
+  }
+}
+
+async function main() {
+  let code = 0
+  try {
+    const a = try parseArgs(process.argv.slice(2))
+    code = try await run(a)
+  } catch (e) {
+    if (e instanceof UsageError) {
+      console.error(`tonyc: ${e.message}\nrun \`tonyc --help\` for usage`)
+      code = 2
+    } else {
+      console.error(`tonyc: ${e.message}`)
+      code = 1
+    }
+  }
+  process.exit(code)
+}

@@ -1,0 +1,105 @@
+# Example tonycd configuration. Copy to ~/.config/tonyc/tonycd.toml.
+# Every key is optional; the values shown are the defaults unless noted.
+
+[daemon]
+# socket = "/run/user/1000/tonyc/tonycd.sock"   # default: $XDG_RUNTIME_DIR/tonyc/tonycd.sock
+# data_dir = "/home/me/.local/share/tonyc"      # default: $XDG_DATA_HOME/tonyc
+# tcp = "127.0.0.1:7878"                        # optional; loopback addresses only
+workers = 1          # concurrent inference slots
+tick_ms = 500
+
+[policy]
+max_locality = "LOCAL_ONLY"      # the ceiling: no job can be planned beyond it
+default_locality = "LOCAL_ONLY"  # for jobs that do not say
+default_quality_floor = 0.5
+default_max_tokens = 512
+max_tokens_ceiling = 8192
+max_input_bytes = 1048576
+# ssh_allowlist = []     # registered nodes are added automatically; raise max_locality to use them
+# remote_allowlist = []
+
+[pressure]
+busy_load_per_core = 0.7     # IDLE/SPECULATIVE (and opportunistic DEFERRED) work waits above this
+min_available_memory = 0.15
+battery_is_busy = true
+gpu_busy_utilisation = 0.8   # nvidia-smi, when present
+max_temperature_c = 90       # hottest /sys/class/thermal zone
+
+[runtimes.ollama]
+enabled = true
+url = "http://127.0.0.1:11434"   # exposure is derived from where this resolves
+request_timeout_secs = 3600
+
+[runtimes.builtin]
+enabled = false   # deterministic echo for testing; not inference
+
+# Any OpenAI-compatible server on this host or the LAN (llama.cpp's
+# llama-server, vLLM, LM Studio, LocalAI). Plain http:// only.
+# [[runtimes.openai]]
+# name = "llamacpp"                # model ids become llamacpp/<model>
+# url = "http://127.0.0.1:8080"
+# api_key_env = "LLAMA_API_KEY"    # optional; read from the environment
+# models = []                      # optional allowlist
+
+# Any local program speaking tonyc.runtime/1 on stdin/stdout (docs/PROTOCOL.md).
+# [[runtimes.command]]
+# name = "candle"
+# argv = ["/opt/candle/phi", "--model", "{model}"]
+# protocol = "json"                # or "text": prompt in, answer out
+# exposure = "local"               # or lan:<host> / remote:<host> if it forwards prompts
+# timeout_secs = 600
+# [[runtimes.command.models]]
+# name = "phi-2"
+# capabilities = { general = 0.55 }
+# tokens_per_sec = 12.0
+# startup_ms = 2500
+# ram_mb = 3000
+
+[fabric]
+ssh_program = "ssh"            # the system OpenSSH client
+keyscan_program = "ssh-keyscan"
+keygen_program = "ssh-keygen"
+# user_known_hosts = "~/.ssh/known_hosts"   # consulted by `node add` when no --host-key is given
+connect_timeout_secs = 10
+probe_interval_secs = 60       # 10 s while a node is down
+request_timeout_secs = 3600
+
+[economics]                  # assumptions behind every £ figure (all estimates)
+reference_name = "premium hosted API (reference)"
+reference_input_gbp_per_mtok = 2.40
+reference_output_gbp_per_mtok = 12.00
+electricity_gbp_per_kwh = 0.25
+local_watts = 35
+node_watts = 50
+gpu_watts = 250
+
+[budgets]
+remote_monthly_gbp = 0       # 0 = never use paid runtimes
+memory_max_mb = 0            # 0 = whatever the host has
+# daily_compute = { speculative = "4h", idle = "8h" }
+
+[pd]                         # Preemptive Dynamism: preparing answers before they are asked for
+enabled = true
+interval_secs = 60
+window = "7d"                # how far back demand is counted
+horizon = "24h"              # how far ahead a prediction looks
+min_demand = 2               # asks before a request is predicted
+min_probability = 0.3        # raised automatically while Preemption Yield is low
+value_ratio = 2.0            # P × cost avoided must beat operating cost by this factor
+max_pending = 2
+daily_compute = "30m"        # SPECULATIVE budget unless budgets.daily_compute sets one
+
+[cognition]
+scan_interval_secs = 30      # re-check corpus and fresh objects (use-time checks happen regardless)
+default_ttl = "7d"           # for results that read no files
+context_objects = 3          # prior objects offered to a model as context
+context_chars = 4000
+related_threshold = 0.25     # 0.6 × lexical relevance + 0.4 × source overlap
+max_corpus_files = 10000
+
+# Capability-profile overrides replace static priors until Phase 4 measures them.
+# [models."ollama/gemma3:latest"]
+# capabilities = { general = 0.65, summarisation = 0.72, rust = 0.4 }
+# tokens_per_sec = 4.5        # measurements replace priors after 3 runs; overrides win over both
+# startup_ms = 15000
+# ram_mb = 4000

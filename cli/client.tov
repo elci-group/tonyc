@@ -1,0 +1,518 @@
+// Tonyc client SDK: the agent-facing contract (directive §18) over the
+// daemon's local HTTP API on a Unix socket. Agents import this module; the
+// `tonyc` CLI is built on it.
+
+// Imported explicitly: Tov only provides the web globals implicitly to a
+// program whose entry file names them.
+import { fetch, Response } from "std/http"
+
+export type Exposure = { kind: string, endpoint?: string, host?: string, node?: string }
+
+export type Runtime = {
+  runtime: string, healthy: bool, exposure?: Exposure, url?: string,
+  models?: int, last_error?: string, note?: string
+}
+
+export type Pressure = {
+  load_1m: f64, load_per_core: f64, memory_available_fraction: f64,
+  on_battery: bool, busy: bool, reasons: string[]
+}
+
+export type Ceiling = { class: string, ssh_allowlist?: string[], remote_allowlist?: string[] }
+
+export type NodeHealth = { name: string, healthy: bool, last_error?: string }
+
+export type CognitionStatus = { fresh: int, stale: int, corpus_files: int, demand: Map<string, int> }
+
+export type Status = {
+  version: string, pid: int, uptime_ms: int, socket: string, data_dir: string,
+  workers: int, running: string[], jobs: Map<string, int>, ceiling: Ceiling,
+  pressure: Pressure, runtimes: Runtime[], off_host_crossings: int, cognition: CognitionStatus,
+  capacity: int, nodes: NodeHealth[]
+}
+
+export type JobSummary = {
+  id: string, state: string, class: string, locality: string, objective: string,
+  submitted_at: int, updated_at: int, deadline_at?: int, model?: string, failure?: string
+}
+
+export type Submitted = { id: string, state: string }
+
+export type Result = {
+  output: string, schema: string, model: string, runtime: string,
+  model_digest?: string, tokens_in: int, tokens_out: int,
+  started_at: int, finished_at: int, semantic_hash: string,
+  reused_from?: string, object_id?: string
+}
+
+export type Failure = { stage: string, reason: string }
+export type JobCore = { id: string, state: string, attempts: int, failure?: Failure }
+export type JobDetail = { job: JobCore, result?: Result }
+
+export type Performance = { tokens_per_sec: f64, prefill_tokens_per_sec: f64, startup_ms: int, warm_startup_ms: int }
+export type QualityEvidence = { passed: int, total: int, prior: f64 }
+export type Evidence = { runs: int, quality: Map<string, QualityEvidence> }
+export type Profile = {
+  id: string, runtime: string, digest?: string, capabilities: Map<string, f64>, source: string,
+  performance: Performance, loaded: bool, evidence: Evidence
+}
+export type ModelEntry = { profile: Profile, exposure: Exposure, healthy: bool, ceiling_blocks?: string }
+export type Models = { models: ModelEntry[], runtimes: Runtime[] }
+
+export type Awaited = { done: bool, detail: JobDetail }
+
+// A cognitive object as listed by query/try. `content` is absent when the
+// object is secret (fetch it by id to see it).
+export type ObjectView = {
+  id: string, kind: string, state: string, scope: string, objective: string,
+  model: string, confidence: f64, validation: string, freshness: string,
+  sensitivity: string, created_at: int, stale_reason?: string, sources: int,
+  parents: int, job_id: string, score?: f64, content?: string, withheld: bool
+}
+
+export type TryReply = { hit: bool, object?: ObjectView, notes?: string[], skipped: string[], nearest?: ObjectView[] }
+
+export type Source = { path: string, blake3: string, bytes: int }
+export type ParentRef = { id: string, relation: string }
+export type FreshnessSpec = { policy: string, ttl_ms?: int, events?: string[] }
+export type CognitiveObject = {
+  id: string, kind: string, semantic_key: string, scope: string, objective: string,
+  content: string, schema: string, confidence: f64, validation: string,
+  freshness: FreshnessSpec, expires_at?: int, state: string, stale_reason?: string,
+  created_at: int, job_id: string, model: string, model_digest?: string,
+  runtime: string, exposure: Exposure, privacy: Ceiling, sensitivity: string,
+  sources: Source[], parents: ParentRef[]
+}
+export type Ancestor = { id: string, relation: string, depth: int, state: string, model?: string, job_id?: string }
+export type ObjectEvent = { seq: int, at: int, kind: string }
+export type ObjectDetail = {
+  object: CognitiveObject, fresh_now: bool, stale_because?: string,
+  ancestors: Ancestor[], children: ParentRef[], events: ObjectEvent[]
+}
+
+export type Invalidation = { objects: string[], jobs: string[] }
+export type ScanReport = { corpus_files: int, corpus_changed: string[], objects_checked: int, invalidated: Invalidation }
+export type Pruned = { pruned: int, objects: string[] }
+export type CorpusEntry = {
+  path: string, scope: string, sensitivity: string, blake3?: string, bytes?: int,
+  present: bool, scanned_at: int
+}
+export type Forgotten = { paths: string[], purged_objects: string[], invalidated: Invalidation, redacted_results: int }
+
+export type NodeGpu = { name: string, vram_mb?: int }
+export type NodeCaps = {
+  arch: string, cores: int, memory_mb: int, load_1m: f64, gpus: NodeGpu[], curl: bool,
+  runtime_ok: bool, runtime_error?: string, models: string[], probed_at: int, probe_ms: int
+}
+export type NodeView = {
+  name: string, target: string, port?: int, identity?: string, runtime_url: string,
+  shared: bool, slots: int, slots_free: int, healthy: bool, last_error?: string,
+  exposure: Exposure, ceiling_blocks?: string, host_keys: int, added_at: int,
+  capabilities?: NodeCaps, models: string[]
+}
+export type AddNodeRequest = {
+  name: string, ssh: string, port?: int, identity?: string, runtime_url?: string,
+  policy?: string, slots?: int, host_key?: string
+}
+export type PolicySetRequest = { max_locality?: string, default_locality?: string, reset?: bool }
+export type Crossing = {
+  seq: int, at: int, job_id: string, exposure: Exposure, bytes_sent: int, bytes_received: int,
+  summary: string, payload_blake3?: string, payload_kept: bool, payload?: string
+}
+export type Audit = { crossings: Crossing[], total_off_host: int }
+export type Violation = { seq: int, job: string, reason: string }
+export type AuditCheck = { checked: int, violations: Violation[] }
+
+export type Observed = {
+  runs: int, tokens_per_sec?: f64, prefill_tokens_per_sec?: f64,
+  cold_startup_ms?: int, warm_startup_ms?: int
+}
+export type ObservationTimings = { load_ms: int, prefill_ms: int, generate_ms: int }
+export type Observation = {
+  at: int, job_id: string, domain: string, tokens_in: int, tokens_out: int, wall_ms: int,
+  timings?: ObservationTimings
+}
+export type ModelDetail = {
+  effective: Profile, exposure: Exposure, healthy: bool, prior?: Profile, observed: Observed,
+  min_runs: int, configured_override: bool, recent: Observation[]
+}
+export type BenchRun = {
+  id: string, model: string, capability?: string, class: string, created_at: int,
+  finished_at?: int, state: string, cases: int, scored: int, passed: int, errors: int
+}
+export type BenchCase = { job_id: string, case: string, capability: string, scored: bool, passed?: bool, note?: string, job_state: string }
+export type BenchDetail = { run: BenchRun, cases: BenchCase[] }
+
+export type EconReference = { name: string, input_gbp_per_mtok: f64, output_gbp_per_mtok: f64, electricity_gbp_per_kwh: f64 }
+export type EconJobs = {
+  inference: int, inference_local: int, inference_off_host: int, served_from_store: int,
+  with_context: int, try_hits: int, try_misses: int, deadline_misses: int,
+  insufficient_quality: int, remote_inference_avoided: int
+}
+export type EconTokens = { tokens_in: int, tokens_out: int }
+export type DomainCompute = { hours: f64, jobs: int }
+export type EconCompute = { hours_by_domain: Map<string, DomainCompute>, energy_wh: f64 }
+export type EconMoney = {
+  conventional_gbp: f64, remote_spend_gbp: f64, energy_gbp: f64, operating_gbp: f64,
+  estimated_cost_avoided_gbp: f64
+}
+export type MonthlyBudget = { spent_gbp: f64, limit_gbp: f64 }
+export type DailyBudget = { used_ms: int, limit_ms: int }
+export type EconBudgets = { remote_monthly: MonthlyBudget, daily_compute: Map<string, DailyBudget>, memory_max_mb: int }
+export type EconPreemption = {
+  produced: int, pd_hits: int, discarded: int, outstanding: int, preemption_yield?: f64,
+  speculative_used_hours: f64, speculative_discarded_hours: f64
+}
+export type OriginLedger = {
+  inference: int, served_from_store: int, compute_hours: f64,
+  conventional_gbp: f64, operating_gbp: f64, estimated_cost_avoided_gbp: f64,
+}
+export type Origin = { system: string, run?: string, agent?: string }
+export type FeedEvent = { seq: int, at: int, job_id: string, kind: string, state?: string, terminal: bool, origin?: Origin }
+export type EventPage = { events: FeedEvent[], next: int }
+export type ProtocolDaemon = { name: string, version: string }
+export type ProtocolInfo = { protocol: string, revision: string, envelope: string, daemon: ProtocolDaemon, features: string[] }
+export type SubmittedFull = { id: string, state: string, replayed?: bool }
+
+export type EconomicsReport = {
+  since: int, reference: EconReference, jobs: EconJobs, tokens: EconTokens, compute: EconCompute,
+  money: EconMoney, inference_avoidance_ratio?: f64, budgets: EconBudgets, preemption: EconPreemption,
+  by_origin: Map<string, OriginLedger>
+}
+
+export type PdMeasured = {
+  produced: int, consumed: int, discarded: int, preemption_yield?: f64, settled_yield?: f64,
+  threshold: f64, compute_used_ms: int, compute_discarded_ms: int
+}
+export type PdStatus = {
+  enabled: bool, paused: bool, window: string, horizon: string, min_demand: int, max_pending: int,
+  pending: int, measured: PdMeasured, budget: DailyBudget, last_evaluated?: int
+}
+export type Prediction = {
+  id: string, at: int, semantic_key: string, objective: string, reason: string, probability: f64,
+  value_gbp: f64, cost_gbp: f64, job_id: string, state: string, object_id?: string,
+  produced_at?: int, settled_at?: int, outcome?: string, compute_ms: int
+}
+export type PdPrediction = { prediction: Prediction, job_state?: string }
+export type Considered = {
+  semantic_key: string, objective: string, prepared: bool, reason: string,
+  probability?: f64, value_gbp?: f64, cost_gbp?: f64
+}
+export type Evaluation = { at: int, status: string, threshold: f64, considered: Considered[], submitted: string[] }
+export type PdExplain = { status: PdStatus, predictions: PdPrediction[], last_evaluation?: Evaluation }
+
+export type InvalidateRequest = { object?: string, path?: string, scope?: string, event?: string, reason?: string }
+export type CorpusAddRequest = { paths: string[], scope?: string, sensitivity?: string }
+
+type ApiError = { error: string, field?: string }
+
+export class DaemonUnavailable extends Error {
+  constructor(readonly socket: string, readonly cause: string) {
+    super(`tonycd is not reachable at ${socket} (${cause}); start it with \`tonycd\``)
+    this.name = "DaemonUnavailable"
+  }
+}
+
+export class ApiFailure extends Error {
+  constructor(readonly status: int, readonly detail: string) {
+    super(detail)
+    this.name = "ApiFailure"
+  }
+}
+
+const TERMINAL: string[] = [
+  "READY", "STALE", "CANCELLED", "DEADLINE_EXCEEDED", "POLICY_BLOCKED",
+  "MODEL_FAILED", "NODE_UNREACHABLE", "INSUFFICIENT_QUALITY"
+]
+
+export function isTerminal(state: string): bool {
+  return TERMINAL.includes(state)
+}
+
+// The socket the daemon listens on by default; mirrors tonycd's rules.
+export function defaultSocket(): string {
+  const explicit = process.env.TONYC_SOCKET
+  if (explicit !== undefined && explicit !== "") return explicit
+  const runtime = process.env.XDG_RUNTIME_DIR
+  if (runtime !== undefined && runtime !== "") return `${runtime}/tonyc/tonycd.sock`
+  const state = process.env.XDG_STATE_HOME
+  if (state !== undefined && state !== "") return `${state}/tonyc/tonycd.sock`
+  return `${process.env.HOME ?? ""}/.local/state/tonyc/tonycd.sock`
+}
+
+export class Client {
+  constructor(readonly socket: string) {}
+
+  // One request; returns the status and body text.
+  async raw(method: string, path: string, body: string | undefined): Promise<Response> throws Error {
+    try {
+      if (body === undefined) {
+        return try await fetch(`http://localhost${path}`, { method: method, unix: this.socket })
+      }
+      return try await fetch(`http://localhost${path}`, { method: method, body: body, unix: this.socket })
+    } catch (e) {
+      throw new DaemonUnavailable(this.socket, e.message)
+    }
+  }
+
+  // The body of a successful reply; API errors become ApiFailure.
+  async text(method: string, path: string, body: string | undefined): Promise<string> throws Error {
+    const res = try await this.raw(method, path, body)
+    const text = try await res.text()
+    if (res.status >= 400) {
+      let message = text
+      try {
+        const e: ApiError = JSON.parse(text)
+        message = e.error
+      } catch (_) {}
+      throw new ApiFailure(res.status, message)
+    }
+    return text
+  }
+
+  async status(): Promise<Status> throws Error {
+    const s: Status = try JSON.parse(try await this.text("GET", "/v1/status", undefined))
+    return s
+  }
+
+  // Submits a work request (YAML or JSON text). Returns the new job id.
+  async submit(request: string): Promise<string> throws Error {
+    const s: Submitted = try JSON.parse(try await this.text("POST", "/v1/jobs", request))
+    return s.id
+  }
+
+  // Submits under an idempotency key: a retry returns the original job.
+  async submitOnce(request: string, key: string): Promise<SubmittedFull> throws Error {
+    let res: Response
+    try {
+      res = try await fetch("http://localhost/v1/jobs", { method: "POST", body: request, headers: { "Idempotency-Key": key }, unix: this.socket })
+    } catch (e) {
+      throw new DaemonUnavailable(this.socket, e.message)
+    }
+    const text = try await res.text()
+    if (res.status >= 400) {
+      const e: ApiError = try JSON.parse(text)
+      throw new ApiFailure(res.status, e.error)
+    }
+    const s: SubmittedFull = try JSON.parse(text)
+    return s
+  }
+
+  async protocol(): Promise<ProtocolInfo> throws Error {
+    const p: ProtocolInfo = try JSON.parse(try await this.text("GET", "/v1/protocol", undefined))
+    return p
+  }
+
+  // One page of the job event feed after a cursor (-1: from now).
+  async events(after: int, waitMs: int, system: string | undefined, limit: int): Promise<EventPage> throws Error {
+    let q = `?after=${after}&wait_ms=${waitMs}&limit=${limit}`
+    if (system !== undefined) q += `&system=${system}`
+    const p: EventPage = try JSON.parse(try await this.text("GET", `/v1/events${q}`, undefined))
+    return p
+  }
+
+  async jobs(state: string | undefined, limit: int, origin: string | undefined): Promise<JobSummary[]> throws Error {
+    let q = `?limit=${limit}`
+    if (state !== undefined) q += `&state=${state}`
+    if (origin !== undefined) q += `&origin=${origin}`
+    const body: { jobs: JobSummary[] } = try JSON.parse(try await this.text("GET", `/v1/jobs${q}`, undefined))
+    return body.jobs
+  }
+
+  async job(id: string): Promise<JobDetail> throws Error {
+    const d: JobDetail = try JSON.parse(try await this.text("GET", `/v1/jobs/${id}`, undefined))
+    return d
+  }
+
+  // The full job record as JSON text, for --json output.
+  async jobJson(id: string): Promise<string> throws Error {
+    return try await this.text("GET", `/v1/jobs/${id}`, undefined)
+  }
+
+  // The daemon's human-readable decision trace.
+  async trace(id: string): Promise<string> throws Error {
+    return try await this.text("GET", `/v1/jobs/${id}/trace`, undefined)
+  }
+
+  // Waits up to timeoutMs for the job to reach a terminal state.
+  async wait(id: string, timeoutMs: int): Promise<Awaited> throws Error {
+    const res = try await this.raw("GET", `/v1/jobs/${id}/await?timeout_ms=${timeoutMs}`, undefined)
+    const text = try await res.text()
+    if (res.status >= 400) {
+      const e: ApiError = try JSON.parse(text)
+      throw new ApiFailure(res.status, e.error)
+    }
+    const detail: JobDetail = try JSON.parse(text)
+    return { done: res.status === 200, detail: detail }
+  }
+
+  // Cancels a job; returns the state the daemon reports (CANCELLED, or
+  // CANCELLING while a running job winds down).
+  async cancel(id: string): Promise<string> throws Error {
+    const s: Submitted = try JSON.parse(try await this.text("POST", `/v1/jobs/${id}/cancel`, ""))
+    return s.state
+  }
+
+  async models(refresh: bool): Promise<Models> throws Error {
+    const text = refresh
+      ? try await this.text("POST", "/v1/models/refresh", "")
+      : try await this.text("GET", "/v1/models", undefined)
+    const m: Models = try JSON.parse(text)
+    return m
+  }
+
+  async policy(): Promise<string> throws Error {
+    return try await this.text("GET", "/v1/policy", undefined)
+  }
+
+  async host(): Promise<string> throws Error {
+    return try await this.text("GET", "/v1/host", undefined)
+  }
+
+  // ---- Cognitive Store ----
+
+  // §19: existing cognition for a request, without queueing any work.
+  async tryExisting(request: string): Promise<TryReply> throws Error {
+    const r: TryReply = try JSON.parse(try await this.text("POST", "/v1/try", request))
+    return r
+  }
+
+  // §18 query: params is a URL query string such as `text=deps&limit=5`.
+  async query(params: string): Promise<ObjectView[]> throws Error {
+    const body: { objects: ObjectView[] } = try JSON.parse(try await this.text("GET", `/v1/cognition?${params}`, undefined))
+    return body.objects
+  }
+
+  async object(id: string): Promise<ObjectDetail> throws Error {
+    const o: ObjectDetail = try JSON.parse(try await this.text("GET", `/v1/cognition/${id}`, undefined))
+    return o
+  }
+
+  async invalidate(req: InvalidateRequest): Promise<Invalidation> throws Error {
+    const r: Invalidation = try JSON.parse(try await this.text("POST", "/v1/invalidate", JSON.stringify(req)))
+    return r
+  }
+
+  async scan(): Promise<ScanReport> throws Error {
+    const r: ScanReport = try JSON.parse(try await this.text("POST", "/v1/cognition/scan", ""))
+    return r
+  }
+
+  async prune(olderThan: string | undefined): Promise<Pruned> throws Error {
+    const body = olderThan === undefined ? "{}" : `{"older_than":${JSON.stringify(olderThan)}}`
+    const r: Pruned = try JSON.parse(try await this.text("POST", "/v1/cache/prune", body))
+    return r
+  }
+
+  async corpusAdd(req: CorpusAddRequest): Promise<CorpusEntry[]> throws Error {
+    const r: { entries: CorpusEntry[] } = try JSON.parse(try await this.text("POST", "/v1/corpus", JSON.stringify(req)))
+    return r.entries
+  }
+
+  async corpus(scope: string | undefined): Promise<CorpusEntry[]> throws Error {
+    const q = scope === undefined ? "" : `?scope=${scope}`
+    const r: { entries: CorpusEntry[] } = try JSON.parse(try await this.text("GET", `/v1/corpus${q}`, undefined))
+    return r.entries
+  }
+
+  // ---- SSH compute fabric ----
+
+  async nodes(): Promise<NodeView[]> throws Error {
+    const r: { nodes: NodeView[] } = try JSON.parse(try await this.text("GET", "/v1/nodes", undefined))
+    return r.nodes
+  }
+
+  async addNode(req: AddNodeRequest): Promise<NodeView> throws Error {
+    const n: NodeView = try JSON.parse(try await this.text("POST", "/v1/nodes", JSON.stringify(req)))
+    return n
+  }
+
+  async probeNode(name: string): Promise<NodeView> throws Error {
+    const n: NodeView = try JSON.parse(try await this.text("POST", `/v1/nodes/${name}/probe`, ""))
+    return n
+  }
+
+  async removeNode(name: string): Promise<void> throws Error {
+    try await this.text("DELETE", `/v1/nodes/${name}`, undefined)
+  }
+
+  async setPolicy(req: PolicySetRequest): Promise<string> throws Error {
+    return try await this.text("POST", "/v1/policy", JSON.stringify(req))
+  }
+
+  // params is a URL query string, e.g. `job=tny_1&payload=true`.
+  async audit(params: string): Promise<Audit> throws Error {
+    const a: Audit = try JSON.parse(try await this.text("GET", `/v1/audit?${params}`, undefined))
+    return a
+  }
+
+  // Re-checks every off-host crossing against its job's locality policy.
+  async verifyAudit(): Promise<AuditCheck> throws Error {
+    const v: AuditCheck = try JSON.parse(try await this.text("GET", "/v1/audit/verify", undefined))
+    return v
+  }
+
+  // ---- Economics ----
+
+  async model(id: string): Promise<ModelDetail> throws Error {
+    const p = new URLSearchParams()
+    p.set("id", id)
+    const m: ModelDetail = try JSON.parse(try await this.text("GET", `/v1/model?${p.toString()}`, undefined))
+    return m
+  }
+
+  async benchmark(body: string): Promise<BenchRun> throws Error {
+    const r: BenchRun = try JSON.parse(try await this.text("POST", "/v1/models/benchmark", body))
+    return r
+  }
+
+  async benchmarkRun(id: string): Promise<BenchDetail> throws Error {
+    const r: BenchDetail = try JSON.parse(try await this.text("GET", `/v1/benchmarks/${id}`, undefined))
+    return r
+  }
+
+  async benchmarks(): Promise<BenchRun[]> throws Error {
+    const r: { runs: BenchRun[] } = try JSON.parse(try await this.text("GET", "/v1/benchmarks", undefined))
+    return r.runs
+  }
+
+  async economics(since: string | undefined): Promise<EconomicsReport> throws Error {
+    const q = since === undefined ? "" : `?since=${since}`
+    const r: EconomicsReport = try JSON.parse(try await this.text("GET", `/v1/economics${q}`, undefined))
+    return r
+  }
+
+  // ---- Preemptive Dynamism ----
+
+  async pdStatus(): Promise<PdStatus> throws Error {
+    const r: PdStatus = try JSON.parse(try await this.text("GET", "/v1/pd", undefined))
+    return r
+  }
+
+  async pdExplain(): Promise<PdExplain> throws Error {
+    const r: PdExplain = try JSON.parse(try await this.text("GET", "/v1/pd/explain", undefined))
+    return r
+  }
+
+  async pdEvaluate(): Promise<Evaluation> throws Error {
+    const r: Evaluation = try JSON.parse(try await this.text("POST", "/v1/pd/evaluate", ""))
+    return r
+  }
+
+  async pdSet(paused: bool): Promise<PdStatus> throws Error {
+    const r: PdStatus = try JSON.parse(try await this.text("POST", paused ? "/v1/pd/pause" : "/v1/pd/resume", ""))
+    return r
+  }
+
+  async forget(target: string): Promise<Forgotten> throws Error {
+    const r: Forgotten = try JSON.parse(try await this.text("POST", "/v1/corpus/forget", `{"target":${JSON.stringify(target)}}`))
+    return r
+  }
+}
+
+test("terminal states", () => {
+  expect(isTerminal("READY")).toBe(true)
+  expect(isTerminal("INSUFFICIENT_QUALITY")).toBe(true)
+  expect(isTerminal("RESOURCE_BLOCKED")).toBe(false)
+  expect(isTerminal("RUNNING")).toBe(false)
+})

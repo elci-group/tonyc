@@ -1,0 +1,126 @@
+// Command-line parsing for `tonyc`: positionals plus `--flag value`,
+// `--flag=value` and boolean `--flag` forms. Repeated value flags collect.
+
+export type Args = {
+  positional: string[],
+  values: Map<string, string[]>,
+  switches: Set<string>
+}
+
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "UsageError"
+  }
+}
+
+const VALUE_FLAGS: string[] = [
+  "socket", "state", "limit", "timeout", "objective", "class", "deadline",
+  "locality", "floor", "capability", "max-tokens", "file", "text", "schema",
+  "verification", "energy", "scope", "kind", "sensitivity", "path", "event",
+  "object", "reason", "older-than", "freshness", "ttl", "ssh", "port", "identity",
+  "runtime-url", "policy", "slots", "host-key", "max-locality", "default-locality",
+  "ssh-allow", "on-node-failure", "job", "cases", "since", "refine", "max-rounds",
+  "check-contains", "check-absent", "check-max-chars", "check-json-field",
+  "origin", "agent", "idempotency-key", "after", "system"
+]
+const SWITCHES: string[] = ["json", "wait", "refresh", "help", "version", "no-cache", "stale", "all", "payload", "reset", "follow"]
+
+export function parseArgs(argv: string[]): Args throws UsageError {
+  const out: Args = { positional: [], values: new Map<string, string[]>(), switches: new Set<string>() }
+  let rest = false
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    if (rest || !arg.startsWith("--") || arg === "-") {
+      out.positional.push(arg)
+      continue
+    }
+    if (arg === "--") {
+      rest = true
+      continue
+    }
+    let name = arg.slice(2)
+    let value: string | undefined = undefined
+    const eq = name.indexOf("=")
+    if (eq >= 0) {
+      value = name.slice(eq + 1)
+      name = name.slice(0, eq)
+    }
+    if (name === "h") name = "help"
+    if (SWITCHES.includes(name)) {
+      if (value !== undefined) throw new UsageError(`--${name} takes no value`)
+      out.switches.add(name)
+      continue
+    }
+    if (!VALUE_FLAGS.includes(name)) throw new UsageError(`unknown option --${name}`)
+    if (value === undefined) {
+      i++
+      value = argv[i]
+    }
+    if (value === undefined) throw new UsageError(`--${name} needs a value`)
+    const seen = out.values.get(name) ?? []
+    seen.push(value)
+    out.values.set(name, seen)
+  }
+  return out
+}
+
+export function flag(a: Args, name: string): string | undefined {
+  const v = a.values.get(name)
+  if (v === undefined) return undefined
+  return v[v.length - 1]
+}
+
+export function flags(a: Args, name: string): string[] {
+  return a.values.get(name) ?? []
+}
+
+export function has(a: Args, name: string): bool {
+  return a.switches.has(name)
+}
+
+// `30s`, `5m`, `2h`, `1500ms` or bare seconds → milliseconds.
+export function parseDuration(text: string): int throws UsageError {
+  const units: Map<string, int> = new Map<string, int>()
+  units.set("ms", 1)
+  units.set("s", 1000)
+  units.set("m", 60000)
+  units.set("h", 3600000)
+  let digits = ""
+  let unit = ""
+  for (const c of text.chars()) {
+    if (unit === "" && c >= "0" && c <= "9") digits += c
+    else unit += c
+  }
+  const n = parseInt(digits)
+  if (n === undefined || digits === "") throw new UsageError(`invalid duration \`${text}\``)
+  if (unit === "") return n * 1000
+  const scale = units.get(unit)
+  if (scale === undefined) throw new UsageError(`invalid duration unit in \`${text}\` (use ms, s, m, h)`)
+  return n * scale
+}
+
+test("parses flags and positionals", () => {
+  const a = try parseArgs(["inspect", "tny_1", "--json", "--socket=/s", "--file", "/a", "--file", "/b"])
+  expect(a.positional).toEqual(["inspect", "tny_1"])
+  expect(has(a, "json")).toBe(true)
+  expect(flag(a, "socket")).toBe("/s")
+  expect(flags(a, "file")).toEqual(["/a", "/b"])
+})
+
+test("rejects unknown options", () => {
+  let failed = false
+  try {
+    parseArgs(["--frobnicate"])
+  } catch (e) {
+    failed = true
+  }
+  expect(failed).toBe(true)
+})
+
+test("durations", () => {
+  expect(try parseDuration("30s")).toBe(30000)
+  expect(try parseDuration("5m")).toBe(300000)
+  expect(try parseDuration("250ms")).toBe(250)
+  expect(try parseDuration("7")).toBe(7000)
+})

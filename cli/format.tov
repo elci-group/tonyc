@@ -1,0 +1,65 @@
+// Terminal formatting helpers for `tonyc`.
+
+import { Exposure } from "./client"
+
+// 432000 → "7m12s", 450 → "450ms".
+export function human(ms: int): string {
+  if (ms < 0) return `-${human(-ms)}`
+  if (ms < 1000) return `${ms}ms`
+  let secs = Math.floor(ms / 1000)
+  let out = ""
+  const sizes: int[] = [86400, 3600, 60, 1]
+  const names: string[] = ["d", "h", "m", "s"]
+  for (let i = 0; i < sizes.length; i++) {
+    const size = sizes[i]!
+    if (secs >= size) {
+      out += `${Math.floor(secs / size)}${names[i]!}`
+      secs = secs % size
+    }
+  }
+  return out
+}
+
+export function pad(s: string, width: int): string {
+  let out = s
+  let n = s.chars().length
+  while (n < width) {
+    out += " "
+    n++
+  }
+  return out
+}
+
+export function clip(s: string, width: int): string {
+  const flat = s.split("\n").join(" ")
+  const chars = flat.chars()
+  if (chars.length <= width) return flat
+  return chars.slice(0, width - 1).join("") + "…"
+}
+
+export function exposureLabel(e: Exposure): string {
+  if (e.kind === "in_process") return "in-process"
+  if (e.kind === "loopback") return `loopback (${e.endpoint ?? "?"})`
+  if (e.kind === "lan") return `LAN (${e.host ?? "?"})`
+  if (e.kind === "ssh") return `SSH node ${e.node ?? "?"}`
+  return `remote (${e.host ?? "?"})`
+}
+
+test("human durations", () => {
+  expect(human(432000)).toBe("7m12s")
+  expect(human(450)).toBe("450ms")
+  expect(human(7200000)).toBe("2h")
+  expect(human(-1500)).toBe("-1s")
+})
+
+test("pad and clip", () => {
+  expect(pad("ab", 4)).toBe("ab  ")
+  expect(pad("abcdef", 4)).toBe("abcdef")
+  expect(clip("hello world", 6)).toBe("hello…")
+  expect(clip("a\nb", 10)).toBe("a b")
+})
+
+test("exposure labels", () => {
+  expect(exposureLabel({ kind: "loopback", endpoint: "127.0.0.1:11434" })).toBe("loopback (127.0.0.1:11434)")
+  expect(exposureLabel({ kind: "in_process" })).toBe("in-process")
+})
