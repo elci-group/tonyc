@@ -1,0 +1,32 @@
+# ELCI project manifest — ELCI-RGCA-001 §5
+# Provisional (Phase 1 machine draft). Human review required for Tier-S/A.
+schema_version = "1.0"
+
+[project]
+id = "tonyc"
+name = "tonyc"
+descriptor = "A latency-arbitrage and cognition-reuse layer for agentic systems: a local daemon that takes agent work with its real constraints — urgency, quality, where data may go — and picks the cheapest execution that satisfies them, from a cached answer to local compute to remote inference."
+status = "active"
+maturity = "beta"
+class = "inference"
+
+[ownership]
+organisation = "elci-group"
+maintainer = "ELCI Group"
+
+[architecture]
+independent_boundary = true
+boundary_reason = "Provisional Phase 1 classification (tier A); pending §17 rationalisation review."
+parent = []
+capabilities = []
+consumers = []
+
+[authority]
+human_write_authority = true
+agent_write_authority = false
+autonomous_operation = false
+
+[lifecycle]
+introduced = "2026"
+supersedes = []
+superseded_by = []
